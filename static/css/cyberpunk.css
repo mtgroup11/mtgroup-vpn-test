@@ -1,0 +1,331 @@
+/*
+  MTGroup VPN Ultimate — Terminal Brutalism (Cyberpunk) Theme
+  Zero-Processor Load, Full RTL Support via CSS Logical Properties
+*/
+
+:root {
+  /* Color Palette */
+  --bg-deep: #050505;
+  --bg-panel: #0a0a0a;
+  --bg-panel-border: #1a1a1a;
+  --neon-green: #39ff14;
+  --neon-green-dim: rgba(57, 255, 20, 0.2);
+  --cyber-blue: #00f0ff;
+  --cyber-blue-dim: rgba(0, 240, 255, 0.2);
+  --text-primary: #e0e0e0;
+  --text-muted: #666666;
+  --danger-red: #ff003c;
+  
+  /* Fonts */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  
+  /* Layout */
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --radius: 0; /* Brutalism => zero border radius */
+}
+
+/* Global Reset */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  overflow-x: hidden;
+  /* Smooth RTL transitions */
+  transition: padding 0.3s ease, margin 0.3s ease;
+}
+
+/* Hardware-Accelerated CRT Scan-lines */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.1),
+    rgba(0, 0, 0, 0.1) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  pointer-events: none;
+  z-index: 9999;
+  mix-blend-mode: overlay;
+  /* Will-change hints the GPU for zero CPU overhead */
+  will-change: transform;
+}
+
+/* Base Typo */
+h1, h2, h3, h4 {
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.text-neon-green { color: var(--neon-green); }
+.text-cyber-blue { color: var(--cyber-blue); }
+.text-danger { color: var(--danger-red); }
+.text-muted { color: var(--text-muted); }
+
+/* Buttons (Cyberpunk Brutalism) */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--neon-green);
+  border: 1px solid var(--neon-green);
+  padding: 0.5rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-decoration: none;
+  /* Logical property for spacing within buttons */
+  gap: 0.5rem;
+}
+
+.btn:hover {
+  background: var(--neon-green);
+  color: var(--bg-deep);
+  box-shadow: 0 0 10px var(--neon-green-dim);
+}
+
+.btn-blue {
+  color: var(--cyber-blue);
+  border-color: var(--cyber-blue);
+}
+.btn-blue:hover {
+  background: var(--cyber-blue);
+  box-shadow: 0 0 10px var(--cyber-blue-dim);
+}
+
+/* Panels & Cards */
+.panel {
+  background-color: var(--bg-panel);
+  border: 1px solid var(--bg-panel-border);
+  padding: var(--spacing-lg);
+  margin-block-end: var(--spacing-lg);
+  position: relative;
+}
+
+.panel::after {
+  /* Decorative brutalist corner */
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  inset-inline-end: -1px;
+  width: 15px;
+  height: 15px;
+  background: var(--bg-panel-border);
+  clip-path: polygon(100% 0, 0% 100%, 100% 100%);
+}
+
+.panel-title {
+  border-block-end: 1px dashed var(--bg-panel-border);
+  padding-block-end: var(--spacing-sm);
+  margin-block-end: var(--spacing-md);
+  color: var(--neon-green);
+}
+
+/* Layout Grid */
+.container {
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: var(--spacing-lg);
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--spacing-lg);
+}
+
+/* Sidebar layout using Logical Properties */
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 250px;
+  background: var(--bg-panel);
+  border-inline-end: 1px solid var(--neon-green-dim);
+  padding: var(--spacing-lg);
+  flex-shrink: 0;
+}
+
+.main-content {
+  flex-grow: 1;
+  padding: var(--spacing-lg);
+}
+
+.nav-link {
+  display: block;
+  padding-block: var(--spacing-sm);
+  color: var(--text-primary);
+  text-decoration: none;
+  border-inline-start: 2px solid transparent;
+  padding-inline-start: var(--spacing-sm);
+  margin-block-end: var(--spacing-sm);
+  transition: all 0.2s;
+}
+
+.nav-link:hover, .nav-link.active {
+  color: var(--neon-green);
+  border-inline-start-color: var(--neon-green);
+  background: var(--neon-green-dim);
+}
+
+/* i18n Dropdown */
+.lang-selector {
+  position: absolute;
+  top: var(--spacing-md);
+  inset-inline-end: var(--spacing-md);
+  background: transparent;
+  color: var(--cyber-blue);
+  border: 1px solid var(--cyber-blue);
+  padding: 0.25rem 0.5rem;
+  font-family: var(--font-mono);
+  outline: none;
+  cursor: pointer;
+}
+
+.lang-selector option {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
+/* Dashboard Specific: Simple Canvas Container */
+.canvas-container {
+  width: 100%;
+  height: 120px;
+  border: 1px solid var(--neon-green-dim);
+  background: rgba(0,0,0,0.5);
+  margin-block-end: var(--spacing-md);
+  position: relative;
+}
+
+.canvas-label {
+  position: absolute;
+  top: 5px;
+  inset-inline-start: 10px;
+  font-size: 0.8rem;
+  color: var(--neon-green);
+}
+
+/* Live Session List */
+.session-list {
+  list-style: none;
+}
+
+.session-item {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--spacing-sm) 0;
+  border-block-end: 1px dashed var(--bg-panel-border);
+  transition: color 0.5s ease;
+}
+
+.session-item.active {
+  color: var(--neon-green);
+}
+
+.session-item.disconnected {
+  color: var(--text-muted);
+}
+
+/* Subscription Specific: Tabs */
+.tabs {
+  display: flex;
+  border-block-end: 1px solid var(--cyber-blue-dim);
+  margin-block-end: var(--spacing-md);
+}
+
+.tab-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-block-end: 2px solid transparent;
+  padding: var(--spacing-sm) var(--spacing-md);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: var(--cyber-blue);
+}
+
+.tab-btn.active {
+  color: var(--cyber-blue);
+  border-block-end-color: var(--cyber-blue);
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* URL Boxes */
+.url-box {
+  display: flex;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--bg-panel-border);
+  margin-block-end: var(--spacing-sm);
+  align-items: center;
+}
+
+.url-text {
+  flex-grow: 1;
+  padding: var(--spacing-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  /* RTL awareness for LTR links */
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+.url-copy {
+  background: var(--bg-panel-border);
+  color: var(--cyber-blue);
+  border: none;
+  padding: var(--spacing-sm) var(--spacing-md);
+  cursor: pointer;
+  transition: background 0.2s;
+  font-weight: bold;
+}
+
+.url-copy:hover {
+  background: var(--cyber-blue-dim);
+}
+
+/* QR Container */
+.qr-container {
+  display: flex;
+  justify-content: center;
+  margin-block-end: var(--spacing-lg);
+  padding: var(--spacing-lg);
+  border: 1px solid var(--neon-green);
+  background: var(--neon-green-dim);
+}
+
+/* RTL Global Mirroring Adjustments (Fallback/Enhancements if needed) */
+/* [dir="rtl"] {
+  Logical properties handle most of the work automatically!
+} */

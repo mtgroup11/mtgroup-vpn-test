@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  vpn-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mtgroup-vpn-backend
+    restart: unless-stopped
+    
+    # ── CRITICAL: eBPF / XDP Network Requirements ──
+    # The application compiles and loads C code into the kernel for DPI evasion
+    # and deep packet inspection. It uses cap_add instead of privileged mode.
+    network_mode: "host"
+    
+    volumes:
+      # Mount kernel headers and modules for BPF compilation
+      - /lib/modules:/lib/modules:ro
+      - /usr/src:/usr/src:ro
+      
+      # Persist SQLite DB and logs
+      - ./mtgroup.db:/app/mtgroup.db
+      - ./mtgroup.log:/app/mtgroup.log
+      - ./audit.log:/app/audit.log
+    
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./mtgroup.db
+      - PYTHONIOENCODING=utf-8
+    
+    # Cap-add for networking (redundant due to privileged: true, but good practice)
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+
+  vpn-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mtgroup-vpn-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - vpn-backend

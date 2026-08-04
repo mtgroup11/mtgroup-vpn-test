@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MTGroup VPN Ultimate | Terminal</title>
+  
+  <link rel="stylesheet" href="/static/css/cyberpunk.css">
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  
+  <script>
+    // -------------------------------------------------------------------------
+    // i18n TECHNICAL DICTIONARY (Statically embedded for zero-latency)
+    // -------------------------------------------------------------------------
+    const i18n_dict = {
+      en: {
+        "title_dashboard": "System Overview",
+        "menu_dashboard": "Dashboard",
+        "menu_users": "Users",
+        "menu_nodes": "Nodes (Servers)",
+        "menu_agent": "Agent Center",
+        "stat_traffic": "Live Traffic (TX/RX)",
+        "stat_ebpf": "eBPF XDP Drops",
+        "stat_sessions": "Active Sessions",
+        "btn_logout": "Logout",
+        "msg_connecting": "Connecting securely...",
+        "msg_auth_failed": "SSE Auth Failed. Invalid JWT.",
+      },
+      tr: {
+        "title_dashboard": "Sistem Özeti",
+        "menu_dashboard": "Kontrol Paneli",
+        "menu_users": "Kullanıcılar",
+        "menu_nodes": "Sunucular (Nodes)",
+        "menu_agent": "Ajan Merkezi",
+        "stat_traffic": "Canlı Trafik (TX/RX)",
+        "stat_ebpf": "eBPF XDP Engellemeleri",
+        "stat_sessions": "Aktif Oturumlar",
+        "btn_logout": "Çıkış Yap",
+        "msg_connecting": "Güvenli bağlantı kuruluyor...",
+        "msg_auth_failed": "SSE Yetki Hatası. Geçersiz JWT.",
+      },
+      fa: {
+        "title_dashboard": "خلاصه سیستم",
+        "menu_dashboard": "داشبورد",
+        "menu_users": "کاربران",
+        "menu_nodes": "سرورها",
+        "menu_agent": "مرکز نمایندگان",
+        "stat_traffic": "ترافیک زنده",
+        "stat_ebpf": "انسداد eBPF XDP",
+        "stat_sessions": "نشست‌های فعال",
+        "btn_logout": "خروج",
+        "msg_connecting": "در حال اتصال ایمن...",
+        "msg_auth_failed": "خطای مجوز SSE. JWT نامعتبر است.",
+      },
+      ar: {
+        "title_dashboard": "نظرة عامة على النظام",
+        "menu_dashboard": "لوحة القيادة",
+        "menu_users": "المستخدمين",
+        "menu_nodes": "الخوادم",
+        "menu_agent": "مركز الوكلاء",
+        "stat_traffic": "حركة المرور المباشرة",
+        "stat_ebpf": "قطرات eBPF XDP",
+        "stat_sessions": "الجلسات النشطة",
+        "btn_logout": "تسجيل خروج",
+        "msg_connecting": "جاري الاتصال الآمن...",
+        "msg_auth_failed": "فشل مصادقة SSE. JWT غير صالح.",
+      },
+      ru: {
+        "title_dashboard": "Обзор системы",
+        "menu_dashboard": "Панель управления",
+        "menu_users": "Пользователи",
+        "menu_nodes": "Узлы (Серверы)",
+        "menu_agent": "Центр агентов",
+        "stat_traffic": "Живой трафик (TX/RX)",
+        "stat_ebpf": "Сбросы eBPF XDP",
+        "stat_sessions": "Активные сессии",
+        "btn_logout": "Выйти",
+        "msg_connecting": "Безопасное подключение...",
+        "msg_auth_failed": "Ошибка авторизации SSE. Неверный JWT.",
+      },
+      zh: {
+        "title_dashboard": "系统概述",
+        "menu_dashboard": "仪表板",
+        "menu_users": "用户",
+        "menu_nodes": "节点 (服务器)",
+        "menu_agent": "代理中心",
+        "stat_traffic": "实时流量 (TX/RX)",
+        "stat_ebpf": "eBPF XDP 拦截",
+        "stat_sessions": "活动会话",
+        "btn_logout": "登出",
+        "msg_connecting": "安全连接中...",
+        "msg_auth_failed": "SSE 认证失败。无效的 JWT。",
+      }
+    };
+
+    function applyLanguage(lang) {
+      if (!i18n_dict[lang]) lang = "en";
+      
+      const isRtl = (lang === "fa" || lang === "ar");
+      document.documentElement.setAttribute("dir", isRtl ? "rtl" : "ltr");
+      document.documentElement.setAttribute("lang", lang);
+      localStorage.setItem("mtgroup_lang", lang);
+
+      document.getElementById("lang-select").value = lang;
+
+      document.querySelectorAll("[data-i18n]").forEach(el => {
+        const key = el.getAttribute("data-i18n");
+        if (i18n_dict[lang][key]) {
+          el.innerText = i18n_dict[lang][key];
+        }
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      // 1. Language Init
+      let savedLang = localStorage.getItem("mtgroup_lang");
+      if (!savedLang) {
+        const browserLang = navigator.language.split("-")[0];
+        savedLang = i18n_dict[browserLang] ? browserLang : "en";
+      }
+      applyLanguage(savedLang);
+
+      // 2. SSE Authentication & Canvas Logic
+      initSSE();
+    });
+  </script>
+</head>
+<body>
+
+  <!-- i18n Dropdown -->
+  <select id="lang-select" class="lang-selector" onchange="applyLanguage(this.value)">
+    <option value="en">ENG</option>
+    <option value="tr">TÜRKÇE</option>
+    <option value="fa">فارسی</option>
+    <option value="ar">العربية</option>
+    <option value="ru">РУССКИЙ</option>
+    <option value="zh">中文</option>
+  </select>
+
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <h2 class="text-neon-green" style="margin-block-end: 2rem;">MTGROUP<br><span class="text-cyber-blue" style="font-size:0.8rem;">ULTIMATE v2.0</span></h2>
+      
+      <nav>
+        <a href="#" class="nav-link active" data-i18n="menu_dashboard">Dashboard</a>
+        <a href="#" class="nav-link" data-i18n="menu_users">Users</a>
+        <a href="#" class="nav-link" data-i18n="menu_nodes">Nodes</a>
+        
+        <!-- Jinja2 Role-based rendering (Safe Push) -->
+        {% if user_role == 'agent' %}
+        <a href="#" class="nav-link text-cyber-blue" style="border-inline-start-color: var(--cyber-blue);" data-i18n="menu_agent">Agent Center</a>
+        {% endif %}
+      </nav>
+
+      <div style="position: absolute; bottom: var(--spacing-lg);">
+        <button class="btn btn-blue" onclick="logout()" data-i18n="btn_logout">Logout</button>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <h1 class="text-neon-green" style="margin-block-end: var(--spacing-lg);" data-i18n="title_dashboard">System Overview</h1>
+
+      <div id="sse-status" class="text-muted" style="margin-block-end: var(--spacing-md);" data-i18n="msg_connecting">
+        Connecting securely...
+      </div>
+
+      <div class="grid-2">
+        
+        <!-- Canvas Graph Panel -->
+        <div class="panel">
+          <h3 class="panel-title" data-i18n="stat_traffic">Live Traffic (TX/RX)</h3>
+          <div class="canvas-container">
+            <span class="canvas-label" id="tx-label">TX: 0 KB/s</span>
+            <span class="canvas-label" id="rx-label" style="top: 25px; color: var(--cyber-blue);">RX: 0 KB/s</span>
+            <canvas id="trafficGraph"></canvas>
+          </div>
+        </div>
+
+        <!-- eBPF Firewall Stats -->
+        <div class="panel">
+          <h3 class="panel-title" data-i18n="stat_ebpf">eBPF XDP Drops</h3>
+          <div style="font-size: 3rem; font-weight: bold;" class="text-danger" id="ebpf-counter">
+            0
+          </div>
+          <div class="text-muted">Total Malicious Packets Dropped (Zero-Overhead)</div>
+        </div>
+
+      </div>
+
+      <!-- Live Sessions List -->
+      <div class="panel">
+        <h3 class="panel-title" data-i18n="stat_sessions">Active Sessions</h3>
+        <ul class="session-list" id="sessionList">
+          <!-- Populated dynamically via SSE -->
+          <li class="session-item text-muted">Awaiting data stream...</li>
+        </ul>
+      </div>
+
+    </main>
+  </div>
+
+  <script>
+    // -------------------------------------------------------------------------
+    // HARDWARE ACCELERATED CANVAS GRAPH (RAM Friendly)
+    // -------------------------------------------------------------------------
+    const canvas = document.getElementById('trafficGraph');
+    const ctx = canvas.getContext('2d', { alpha: false }); // Optimize drawing
+    const historySize = 60; // Keep last 60 points
+    const txData = Array(historySize).fill(0);
+    const rxData = Array(historySize).fill(0);
+
+    function resizeCanvas() {
+      // Fit container accurately
+      canvas.width = canvas.parentElement.clientWidth;
+      canvas.height = canvas.parentElement.clientHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function drawGraph() {
+      const width = canvas.width;
+      const height = canvas.height;
+      
+      // Clear background with solid color
+      ctx.fillStyle = '#050505';
+      ctx.fillRect(0, 0, width, height);
+
+      const maxVal = Math.max(...txData, ...rxData, 100); // 100 as base scale
+      const stepX = width / (historySize - 1);
+
+      // Draw TX (Neon Green)
+      ctx.beginPath();
+      ctx.strokeStyle = '#39ff14';
+      ctx.lineWidth = 2;
+      for(let i=0; i<historySize; i++) {
+        const x = i * stepX;
+        const y = height - (txData[i] / maxVal) * height;
+        if(i===0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Draw RX (Cyber Blue)
+      ctx.beginPath();
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 2;
+      for(let i=0; i<historySize; i++) {
+        const x = i * stepX;
+        const y = height - (rxData[i] / maxVal) * height;
+        if(i===0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // -------------------------------------------------------------------------
+    // SSE CONNECTION WITH JWT AUTHENTICATION
+    // -------------------------------------------------------------------------
+    function initSSE() {
+      // In production, token is retrieved from HttpOnly cookie or localStorage
+      const token = localStorage.getItem("jwt_token") || "mock-token-123";
+      
+      // We pass the JWT securely via URL query params since EventSource doesn't support custom headers easily.
+      // Backend MUST validate this JWT and drop connection immediately if invalid.
+      const eventSource = new EventSource(`/api/v1/stream/dashboard?token=${encodeURIComponent(token)}`);
+      let errorCount = 0; // Track consecutive errors to distinguish auth failure from network blip
+
+      eventSource.onopen = function() {
+        document.getElementById("sse-status").innerText = "SECURE STREAM CONNECTED";
+        document.getElementById("sse-status").classList.add("text-neon-green");
+        document.getElementById("sse-status").classList.remove("text-muted", "text-danger");
+      };
+
+      eventSource.onerror = function(err) {
+        errorCount++;
+        // Only close permanently after 3 consecutive errors (likely auth failure or revoked token)
+        // For transient network glitches, let EventSource auto-reconnect
+        if (errorCount >= 3) {
+          document.getElementById("sse-status").innerText = document.querySelector('[data-i18n="msg_auth_failed"]').innerText;
+          document.getElementById("sse-status").classList.add("text-danger");
+          document.getElementById("sse-status").classList.remove("text-neon-green");
+          eventSource.close();
+        }
+      };
+
+      eventSource.onmessage = function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // 1. Update Graph
+          if (data.traffic) {
+            txData.shift(); txData.push(data.traffic.tx);
+            rxData.shift(); rxData.push(data.traffic.rx);
+            document.getElementById("tx-label").innerText = `TX: ${data.traffic.tx} KB/s`;
+            document.getElementById("rx-label").innerText = `RX: ${data.traffic.rx} KB/s`;
+            requestAnimationFrame(drawGraph);
+            errorCount = 0; // Reset on successful message
+          }
+
+          // 2. Update eBPF
+          if (data.ebpf_drops !== undefined) {
+            document.getElementById("ebpf-counter").innerText = data.ebpf_drops.toLocaleString();
+          }
+
+          // 3. Update Live Sessions (use textContent to prevent XSS from malicious usernames)
+          if (data.sessions) {
+            const list = document.getElementById("sessionList");
+            list.innerHTML = "";
+            data.sessions.forEach(sess => {
+              const li = document.createElement("li");
+              li.className = `session-item ${sess.active ? 'active' : 'disconnected'}`;
+              const nameSpan = document.createElement("span");
+              nameSpan.textContent = sess.username;
+              const ipSpan = document.createElement("span");
+              ipSpan.textContent = sess.ip;
+              li.appendChild(nameSpan);
+              li.appendChild(ipSpan);
+              list.appendChild(li);
+            });
+          }
+
+        } catch (e) {
+          console.error("Parse error", e);
+        }
+      };
+    }
+
+    function logout() {
+      localStorage.removeItem("jwt_token");
+      window.location.href = "/login";
+    }
+  </script>
+</body>
+</html>

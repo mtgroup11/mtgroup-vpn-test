@@ -1,0 +1,14 @@
+[Unit]
+Description=MTGroup VPN Anti-Lockout Watchdog
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mtgroup/backend/app/core/watchdog.py
+Restart=always
+RestartSec=5
+User=root
+# We need to run as root to modify iptables and restart systemd units
+
+[Install]
+WantedBy=multi-user.target

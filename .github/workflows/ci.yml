@@ -1,0 +1,94 @@
+name: MTGroup VPN Ultimate CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff mypy pytest pytest-asyncio pytest-cov httpx
+
+      - name: Lint with ruff
+        run: |
+          ruff check backend/ telegram_bot/ --ignore E501
+
+      - name: Type check with mypy
+        run: |
+          mypy backend/app/ --ignore-missing-imports --no-strict-optional
+        continue-on-error: true
+
+      - name: Run API tests
+        run: |
+          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x
+
+      - name: Run eBPF tests
+        run: |
+          pytest backend/tests/test_ebpf.py -v --asyncio-mode=auto --tb=short
+
+      - name: Run Telegram bot tests
+        run: |
+          pytest telegram_bot/tests_bot.py -v --asyncio-mode=auto --tb=short
+
+      - name: Test coverage report
+        run: |
+          pytest backend/tests/ telegram_bot/tests_bot.py \
+            --asyncio-mode=auto \
+            --cov=backend \
+            --cov=telegram_bot \
+            --cov-report=term-missing \
+            --cov-fail-under=60
+        continue-on-error: true
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install bandit safety
+
+      - name: Security scan with bandit
+        run: |
+          bandit -r backend/ telegram_bot/ -ll --skip B101
+        continue-on-error: true
+
+      - name: Check for vulnerable dependencies
+        run: |
+          pip install -r requirements.txt
+          safety check --full-report
+        continue-on-error: true

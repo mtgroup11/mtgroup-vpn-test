@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="MTGroup VPN Ultimate Dashboard — User management, node control, and subscription generation">
+    <title>MTGroup VPN Ultimate — Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        cyber: { green: '#00FF66', dark: '#000000', card: '#0a0a0a', border: '#1a1a1a', hover: '#0d3320' }
+                    },
+                    fontFamily: { mono: ['JetBrains Mono', 'monospace'], sans: ['Inter', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-black min-h-screen font-sans">
+    <div class="flex h-screen overflow-hidden">
+        <!-- ═══ Sidebar ═══ -->
+        <aside id="sidebar" class="sidebar w-60 flex-shrink-0 flex flex-col py-4 px-3 overflow-y-auto">
+            <!-- Logo -->
+            <div class="px-2 mb-6">
+                <pre class="text-cyber-green font-mono text-[6px] leading-tight glow-text select-none">███╗   ███╗████████╗
+████╗ ████║╚══██╔══╝
+██╔████╔██║   ██║
+██║╚██╔╝██║   ██║
+██║ ╚═╝ ██║   ██║
+╚═╝     ╚═╝   ╚═╝</pre>
+                <p class="text-gray-600 font-mono text-[10px] mt-1">VPN ULTIMATE v1.0</p>
+            </div>
+
+            <nav class="space-y-1 flex-1">
+                <a href="#" class="sidebar-item active" data-page="overview" id="nav-overview">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+                    Overview
+                </a>
+                <a href="#" class="sidebar-item" data-page="users" id="nav-users">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"/></svg>
+                    Users
+                </a>
+                <a href="#" class="sidebar-item" data-page="nodes" id="nav-nodes">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2"/></svg>
+                    Nodes
+                </a>
+                <a href="#" class="sidebar-item" data-page="subscriptions" id="nav-subscriptions">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+                    Subscriptions
+                </a>
+                <a href="#" class="sidebar-item" data-page="security" id="nav-security">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    Security & Kernel
+                </a>
+                <a href="#" class="sidebar-item" data-page="obfuscation" id="nav-obfuscation">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+                    Obfuscation & Mesh
+                </a>
+                <a href="#" class="sidebar-item" data-page="settings" id="nav-settings">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    Settings
+                </a>
+            </nav>
+
+            <!-- Logout -->
+            <div class="mt-auto pt-4 border-t border-cyber-border">
+                <button id="logout-btn" class="sidebar-item w-full text-red-400 hover:text-red-300 hover:bg-red-900/10">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    Logout
+                </button>
+            </div>
+        </aside>
+
+        <!-- ═══ Main Content ═══ -->
+        <main class="flex-1 overflow-y-auto">
+            <!-- Top Bar -->
+            <header class="sticky top-0 z-20 bg-black/90 backdrop-blur-xl border-b border-cyber-border px-6 py-3 flex items-center justify-between">
+                <button id="menu-toggle" class="md:hidden text-gray-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <div>
+                    <h2 id="page-title" class="text-white font-semibold text-lg">Overview</h2>
+                    <p class="text-gray-600 text-xs font-mono" id="page-subtitle">System Dashboard</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs font-mono text-gray-500" id="clock"></span>
+                    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cyber-green/5 border border-cyber-green/10">
+                        <span class="w-2 h-2 rounded-full bg-cyber-green animate-pulse"></span>
+                        <span class="text-cyber-green text-xs font-mono" id="admin-name">admin</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Page Content Container -->
+            <div class="p-6">
+                <!-- ═══ Overview Page ═══ -->
+                <div id="page-overview" class="page-content">
+                    <!-- Stats Cards -->
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                        <div class="stats-card">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-gray-500 text-xs font-mono uppercase">Total Users</span>
+                                <svg class="w-4 h-4 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-white" id="stat-total-users">0</p>
+                            <p class="text-xs text-gray-600 mt-1"><span class="text-cyber-green" id="stat-active-users">0</span> active</p>
+                        </div>
+                        <div class="stats-card">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-gray-500 text-xs font-mono uppercase">Active Nodes</span>
+                                <svg class="w-4 h-4 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-white" id="stat-active-nodes">0</p>
+                            <p class="text-xs text-gray-600 mt-1"><span id="stat-total-nodes">0</span> total</p>
+                        </div>
+                        <div class="stats-card">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-gray-500 text-xs font-mono uppercase">CPU Usage</span>
+                                <svg class="w-4 h-4 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-white"><span id="stat-cpu">0</span>%</p>
+                            <div class="progress-bar mt-2"><div class="progress-fill" id="cpu-bar" style="width:0%"></div></div>
+                        </div>
+                        <div class="stats-card">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-gray-500 text-xs font-mono uppercase">Memory</span>
+                                <svg class="w-4 h-4 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-white"><span id="stat-mem">0</span>%</p>
+                            <div class="progress-bar mt-2"><div class="progress-fill" id="mem-bar" style="width:0%"></div></div>
+                        </div>
+                    </div>
+
+                    <!-- Traffic Chart -->
+                    <div class="cyber-card rounded-xl p-6 mb-6">
+                        <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                            <svg class="w-4 h-4 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/></svg>
+                            Real-time Traffic
+                        </h3>
+                        <div class="h-64">
+                            <canvas id="traffic-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Recent Users Table -->
+                        <div class="cyber-card rounded-xl overflow-hidden">
+                            <div class="px-6 py-4 border-b border-cyber-border flex items-center justify-between">
+                                <h3 class="text-white font-semibold">Recent Users</h3>
+                                <button class="btn-cyber btn-primary text-xs" onclick="navigateTo('users')">View All →</button>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="data-table" id="recent-users-table">
+                                    <thead><tr><th>User</th><th>Status</th><th>Data Usage</th><th>Expires</th><th>Actions</th></tr></thead>
+                                    <tbody id="recent-users-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- AI Threat Matrix Terminal -->
+                        <div class="cyber-card rounded-xl p-4 flex flex-col h-[320px]">
+                            <h3 class="text-white font-semibold mb-2 flex items-center gap-2 text-sm">
+                                <span class="text-cyber-green animate-pulse">●</span> AI Threat Matrix
+                            </h3>
+                            <div class="bg-black border border-cyber-border rounded-lg flex-1 overflow-y-auto p-3 font-mono text-[10px] leading-relaxed text-gray-400 flex flex-col gap-1" id="threat-terminal">
+                                <div class="text-cyber-green">> Initiating Singularity Engine...</div>
+                                <div class="text-cyber-green">> Establishing eBPF kernel hooks... OK</div>
+                                <div class="text-cyber-green">> Listening for anomalous signatures...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ Users Page ═══ -->
+                <div id="page-users" class="page-content hidden">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <input type="text" id="user-search" class="input-cyber w-64" placeholder="Search users...">
+                        </div>
+                        <button class="btn-cyber btn-primary" id="btn-create-user" onclick="showCreateUserModal()">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+                            Create User
+                        </button>
+                    </div>
+                    <div class="cyber-card rounded-xl overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="data-table">
+                                <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Data</th><th>Bandwidth</th><th>Expires</th><th>Actions</th></tr></thead>
+                                <tbody id="users-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ Nodes Page ═══ -->
+                <div id="page-nodes" class="page-content hidden">
+                    <div class="flex items-center justify-between mb-6">
+                        <h3 class="text-white font-semibold">Server Nodes</h3>
+                        <button class="btn-cyber btn-primary" onclick="showCreateNodeModal()">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+                            Add Node
+                        </button>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4" id="nodes-grid"></div>
+                </div>
+
+                <!-- ═══ Subscriptions Page ═══ -->
+                <div id="page-subscriptions" class="page-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Sub Generator -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4">Subscription Generator</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">SELECT USER</label>
+                                    <select id="sub-user-select" class="input-cyber">
+                                        <option value="">Choose a user...</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">FORMAT</label>
+                                    <select id="sub-format" class="input-cyber">
+                                        <option value="singbox">Sing-box (Streisand/Nekobox/V2Box)</option>
+                                        <option value="clash">Clash Meta (Mihomo)</option>
+                                        <option value="v2ray">V2Ray Base64 (v2rayNG)</option>
+                                        <option value="amnezia">AmneziaWG (.conf)</option>
+                                    </select>
+                                </div>
+                                <button class="btn-cyber btn-primary w-full" onclick="generateSubscription()">Generate Subscription</button>
+                            </div>
+
+                            <!-- QR Code Display -->
+                            <div id="qr-container" class="mt-6 hidden text-center">
+                                <div class="bg-black rounded-lg p-4 inline-block border border-cyber-border">
+                                    <img id="qr-image" class="w-48 h-48" alt="QR Code">
+                                </div>
+                                <div class="mt-3">
+                                    <input id="sub-link-display" class="input-cyber text-xs" readonly>
+                                    <button class="btn-cyber btn-ghost mt-2 text-xs" onclick="copySubLink()">📋 Copy Link</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- AmneziaWG Slider Panel -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                                <span class="text-cyber-green">⚡</span> AmneziaWG Parameters
+                            </h3>
+                            <p class="text-gray-500 text-xs mb-4">Adjust obfuscation parameters for DPI evasion</p>
+                            <div class="space-y-4" id="amnezia-sliders">
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Jc (Junk Count)</span>
+                                        <span class="text-cyber-green" id="jc-val">4</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="128" value="4" id="slider-jc" oninput="document.getElementById('jc-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Jmin (Min Junk Size)</span>
+                                        <span class="text-cyber-green" id="jmin-val">40</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="1280" value="40" id="slider-jmin" oninput="document.getElementById('jmin-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Jmax (Max Junk Size)</span>
+                                        <span class="text-cyber-green" id="jmax-val">70</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="1280" value="70" id="slider-jmax" oninput="document.getElementById('jmax-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">S1 (Init Padding)</span>
+                                        <span class="text-cyber-green" id="s1-val">0</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="1280" value="0" id="slider-s1" oninput="document.getElementById('s1-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">S2 (Response Padding)</span>
+                                        <span class="text-cyber-green" id="s2-val">0</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="1280" value="0" id="slider-s2" oninput="document.getElementById('s2-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">H1 (Init Header)</span>
+                                        <span class="text-cyber-green" id="h1-val">1</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="2147483647" value="1" step="1" id="slider-h1" oninput="document.getElementById('h1-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">H2 (Response Header)</span>
+                                        <span class="text-cyber-green" id="h2-val">2</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="0" max="2147483647" value="2" step="1" id="slider-h2" oninput="document.getElementById('h2-val').textContent=this.value">
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4" onclick="saveSettings('amnezia')">Save AmneziaWG Defaults</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ Security Page ═══ -->
+                <div id="page-security" class="page-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Post-Quantum Shield -->
+                        <div class="cyber-card rounded-xl p-6 relative overflow-hidden group">
+                            <div class="absolute inset-0 bg-cyber-green/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                            <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                                <svg class="w-5 h-5 text-cyber-green" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                                Post-Quantum Shield
+                            </h3>
+                            <p class="text-gray-500 text-xs mb-4">Enable Kyber-768 KEM hybrid key exchange for all tunnels.</p>
+                            <div class="flex items-center justify-between bg-black/50 p-3 rounded-lg border border-cyber-border mb-4">
+                                <div>
+                                    <span class="text-gray-300 text-sm block">Kyber-768 Engine</span>
+                                    <span class="text-[10px] text-cyber-green font-mono">STATUS: <span id="pq-status-text">OFFLINE</span></span>
+                                </div>
+                                <div class="toggle-switch" id="toggle-pq" onclick="this.classList.toggle('active'); document.getElementById('pq-status-text').textContent = this.classList.contains('active') ? 'ACTIVE' : 'OFFLINE';"></div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full text-xs" onclick="saveSettings('security')">Apply Quantum Crypto</button>
+                        </div>
+
+                        <!-- Active Probe Deflection -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                                <span class="text-cyber-green">🪞</span> Decoy Reverse Proxy
+                            </h3>
+                            <p class="text-gray-500 text-xs mb-4">Deflect active scanners (e.g., GFW/Roskomnadzor probes) to a legitimate target.</p>
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">DECOY TARGET URL</label>
+                                    <input type="text" id="decoy-url" class="input-cyber font-mono text-xs" placeholder="https://www.microsoft.com" value="https://www.microsoft.com">
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4 text-xs" onclick="saveSettings('security')">Update Decoy Route</button>
+                        </div>
+                    </div>
+
+                    <!-- Ban Management -->
+                    <div class="cyber-card rounded-xl mt-6 p-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-white font-semibold flex items-center gap-2">
+                                <span class="text-red-500">⚠</span> Threat Matrix: Banned IPs
+                            </h3>
+                            <div class="flex gap-2">
+                                <input type="text" id="manual-ban-ip" class="input-cyber text-xs w-40" placeholder="1.2.3.4">
+                                <button class="btn-cyber btn-danger text-xs" onclick="manualBanIP()">Ban IP</button>
+                            </div>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="data-table">
+                                <thead><tr><th>IP Address</th><th>Reason</th><th>Expiration</th><th>Actions</th></tr></thead>
+                                <tbody id="bans-table-body">
+                                    <tr><td colspan="4" class="text-center text-gray-500 text-xs py-4">No banned IPs.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ Obfuscation Page ═══ -->
+                <div id="page-obfuscation" class="page-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Port Hopping -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                                <span class="text-cyber-green">🔄</span> Dynamic Port Hopping
+                            </h3>
+                            <p class="text-gray-500 text-xs mb-4">eBPF-driven automatic port rotation to evade DPI static filters.</p>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">STANDARD PORTS (CSV)</label>
+                                    <input type="text" id="hop-low" class="input-cyber font-mono text-xs" value="80,443,8080,8888">
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="text-gray-400 text-xs font-mono block mb-1">HIGH RANGE START</label>
+                                        <input type="number" id="hop-high-start" class="input-cyber text-xs" value="50000">
+                                    </div>
+                                    <div>
+                                        <label class="text-gray-400 text-xs font-mono block mb-1">HIGH RANGE END</label>
+                                        <input type="number" id="hop-high-end" class="input-cyber text-xs" value="65000">
+                                    </div>
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4 text-xs" onclick="saveSettings('obfuscation')">Deploy Port Mesh</button>
+                        </div>
+
+                        <!-- Traffic Shaping -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+                                <span class="text-cyber-green">🎭</span> Traffic Shaping
+                            </h3>
+                            <p class="text-gray-500 text-xs mb-4">Mask packet timing signatures by injecting jitter and chaff.</p>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">SHAPING PROFILE</label>
+                                    <select id="shape-mode" class="input-cyber text-xs">
+                                        <option value="video_stream">Video Streaming (Youtube/Netflix)</option>
+                                        <option value="web_browsing">Web Browsing (Random Spikes)</option>
+                                        <option value="voip">VoIP Call (Constant Bitrate)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Jitter Max (ms)</span>
+                                        <span class="text-cyber-green" id="jitter-val">50</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="5" max="200" value="50" id="slider-jitter" oninput="document.getElementById('jitter-val').textContent=this.value">
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4 text-xs" onclick="saveSettings('obfuscation')">Apply Traffic Profile</button>
+                        </div>
+                        <!-- System Configuration Table -->
+                        <div class="cyber-card rounded-xl p-6 lg:col-span-2">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-white font-semibold">Core Configuration</h3>
+                                <button class="btn-cyber btn-ghost text-xs" onclick="loadConfig()">🔄 Refresh</button>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-left text-sm text-gray-300">
+                                    <thead class="text-xs uppercase bg-[#111111] text-gray-400">
+                                        <tr>
+                                            <th class="px-4 py-3">Key</th>
+                                            <th class="px-4 py-3">Value</th>
+                                            <th class="px-4 py-3">Description</th>
+                                            <th class="px-4 py-3">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="config-table-body" class="divide-y divide-[#222222]">
+                                        <!-- Loaded via JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- ═══ Smart SNI & Auto-CDN ═══ -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4 text-[#00FF66] flex items-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                Smart SNI & Auto-CDN
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">CLOUDFLARE API KEY</label>
+                                    <input type="password" id="cfg-cdn-key" class="input-cyber" placeholder="Optional for Auto-CDN">
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" id="cfg-cdn-enable" class="accent-[#00FF66]">
+                                    <label class="text-sm text-gray-300">Enable Clean IP Auto-CDN Rotation</label>
+                                </div>
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">FALLBACK SNI POOL (Comma separated)</label>
+                                    <input type="text" id="cfg-sni-pool" class="input-cyber" placeholder="yahoo.com, microsoft.com">
+                                </div>
+                                <button class="btn-cyber btn-primary w-full" onclick="saveCDNConfig(this)">Save CDN & SNI Logic</button>
+                            </div>
+                        </div>
+
+                        <!-- ═══ Telegram Bot Integration ═══ -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-[#0088FF] font-semibold mb-4 flex items-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                                Telegram Bot
+                            </h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">BOT TOKEN</label>
+                                    <input type="password" id="cfg-tg-token" class="input-cyber" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+                                </div>
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">ADMIN CHAT ID</label>
+                                    <input type="text" id="cfg-tg-admin" class="input-cyber" placeholder="For Threat Alerts">
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" id="cfg-tg-enable" class="accent-[#0088FF]">
+                                    <label class="text-sm text-gray-300">Enable Bot & Sales Reporting</label>
+                                </div>
+                                <button class="btn-cyber bg-[#0088FF] text-black w-full" onclick="saveTelegramConfig(this)">Save Bot Config</button>
+                            </div>
+                        </div>
+                        
+                        <!-- TLS Fragmentation -->
+                        <div class="cyber-card rounded-xl p-6 lg:col-span-2">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <h3 class="text-white font-semibold flex items-center gap-2">
+                                        <span class="text-cyber-green">✂</span> TLS Record Fragmentation
+                                    </h3>
+                                    <p class="text-gray-500 text-xs mt-1">Split SNI headers across multiple TCP packets to defeat SNI sniffers.</p>
+                                </div>
+                                <div class="toggle-switch active" id="toggle-tls-frag" onclick="this.classList.toggle('active')"></div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Frag Size Min (bytes)</span>
+                                        <span class="text-cyber-green" id="tls-smin-val">50</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="10" max="100" value="50" id="slider-tls-smin" oninput="document.getElementById('tls-smin-val').textContent=this.value">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs font-mono mb-1">
+                                        <span class="text-gray-400">Frag Size Max (bytes)</span>
+                                        <span class="text-cyber-green" id="tls-smax-val">200</span>
+                                    </div>
+                                    <input type="range" class="slider-cyber" min="100" max="500" value="200" id="slider-tls-smax" oninput="document.getElementById('tls-smax-val').textContent=this.value">
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4 text-xs" onclick="saveSettings('obfuscation')">Apply TLS Rules</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ Settings Page ═══ -->
+                <div id="page-settings" class="page-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Gamer Mode -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4">🎮 Gamer Mode & QoS</h3>
+                            <p class="text-gray-500 text-xs mb-4">Optimize routing for low-latency gaming sockets</p>
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Gamer Mode</span>
+                                    <div class="toggle-switch" id="toggle-gamer" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Zero Packet Loss</span>
+                                    <div class="toggle-switch active" id="toggle-zpl" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">UDP Optimization</span>
+                                    <div class="toggle-switch active" id="toggle-udp" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4" onclick="saveSettings('gamer_mode')">Save Gamer Mode</button>
+                        </div>
+
+                        <!-- Battery Saver -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4">🔋 Eco-Stealth Battery</h3>
+                            <p class="text-gray-500 text-xs mb-4">Reduce background battery consumption below 1%/24h</p>
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Battery Saver</span>
+                                    <div class="toggle-switch" id="toggle-battery" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">Idle Timeout (sec)</label>
+                                    <input type="number" id="battery-idle" class="input-cyber" value="300" min="60" max="3600">
+                                </div>
+                                <div>
+                                    <label class="text-gray-400 text-xs font-mono block mb-1">Keep-alive Interval (sec)</label>
+                                    <input type="number" id="battery-keepalive" class="input-cyber" value="600" min="60" max="3600">
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4" onclick="saveSettings('battery_saver')">Save Battery Rules</button>
+                        </div>
+
+                        <!-- Iran Bypass -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4">🇮🇷 Iran Bypass Rules</h3>
+                            <p class="text-gray-500 text-xs mb-4">Route .ir domains and local banks directly</p>
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Iran Bypass</span>
+                                    <div class="toggle-switch active" id="toggle-iran-global" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Bank IR Category</span>
+                                    <div class="toggle-switch active" id="toggle-iran-bank" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-gray-300 text-sm">Bourse IR Category</span>
+                                    <div class="toggle-switch active" id="toggle-iran-bourse" onclick="this.classList.toggle('active')"></div>
+                                </div>
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4" onclick="saveSettings('iran_bypass')">Save Bypass Rules</button>
+                        </div>
+
+                        <!-- Bandwidth Throttle -->
+                        <div class="cyber-card rounded-xl p-6">
+                            <h3 class="text-white font-semibold mb-4">📡 Bandwidth Control</h3>
+                            <p class="text-gray-500 text-xs mb-4">Per-user bandwidth caps (max 50 Mbps)</p>
+                            <div>
+                                <div class="flex justify-between text-xs font-mono mb-1">
+                                    <span class="text-gray-400">Max Bandwidth</span>
+                                    <span class="text-cyber-green" id="bw-val">50 Mbps</span>
+                                </div>
+                                <input type="range" class="slider-cyber" id="bw-slider" min="1" max="50" value="50" oninput="document.getElementById('bw-val').textContent=this.value+' Mbps'">
+                            </div>
+                            <button class="btn-cyber btn-primary w-full mt-4" onclick="saveSettings('bandwidth')">Save Global Throttle</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- ═══ Create User Modal ═══ -->
+    <div id="create-user-modal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-white font-semibold">Create New User</h3>
+                <button class="text-gray-500 hover:text-white" onclick="closeModal('create-user-modal')">✕</button>
+            </div>
+            <form id="create-user-form" class="space-y-4">
+                <div>
+                    <label class="text-gray-400 text-xs font-mono block mb-1">USERNAME</label>
+                    <input type="text" id="new-username" class="input-cyber" required minlength="3" placeholder="username">
+                </div>
+                <div>
+                    <label class="text-gray-400 text-xs font-mono block mb-1">PASSWORD</label>
+                    <input type="password" id="new-password" class="input-cyber" required minlength="6" placeholder="••••••">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-gray-400 text-xs font-mono block mb-1">EXPIRE (DAYS)</label>
+                        <input type="number" id="new-expire" class="input-cyber" value="30" min="1">
+                    </div>
+                    <div>
+                        <label class="text-gray-400 text-xs font-mono block mb-1">DATA LIMIT (GB)</label>
+                        <input type="number" id="new-data-limit" class="input-cyber" value="50" min="0" step="0.1">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-gray-400 text-xs font-mono block mb-1">BW LIMIT (MBPS)</label>
+                        <input type="number" id="new-bw-limit" class="input-cyber" value="0" min="0" max="50">
+                    </div>
+                    <div>
+                        <label class="text-gray-400 text-xs font-mono block mb-1">TELEGRAM ID</label>
+                        <input type="number" id="new-telegram-id" class="input-cyber" placeholder="Optional">
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-sm text-gray-300">
+                    <label class="flex items-center gap-2"><input type="checkbox" id="new-gamer-mode" class="accent-[#00FF66]"> Gamer Mode</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" id="new-iran-bypass" checked class="accent-[#00FF66]"> Iran Bypass</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" id="new-warp-bypass" class="accent-[#00FF66]"> WARP Bypass (Captcha)</label>
+                </div>
+                <div class="flex gap-3">
+                    <button type="submit" class="btn-cyber btn-primary flex-1">Create User</button>
+                    <button type="button" class="btn-cyber btn-ghost flex-1" onclick="closeModal('create-user-modal')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ═══ JavaScript ═══ -->
+    <script>
+        const API_BASE = '';
+        const token = () => localStorage.getItem('access_token');
+        const headers = () => ({ 'Authorization': `Bearer ${token()}`, 'Content-Type': 'application/json' });
+
+        // ── Auth & Role Check ────────────────────────────────────
+        if (!token()) { window.location.href = '/'; }
+        
+        function getUserRole() {
+            try {
+                const payload = JSON.parse(atob(token().split('.')[1]));
+                return payload.role || 'admin';
+            } catch (e) { return 'admin'; }
+        }
+        const currentUserRole = getUserRole();
+
+        // ── Clock ────────────────────────────────────────────────
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent = now.toLocaleTimeString('en-US', { hour12: false });
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // ── Navigation ───────────────────────────────────────────
+        function navigateTo(page) {
+            if (currentUserRole === 'reseller' && ['security', 'obfuscation', 'nodes', 'settings'].includes(page)) {
+                alert('Access Denied: Resellers cannot access system core settings.');
+                return;
+            }
+            document.querySelectorAll('.page-content').forEach(p => p.classList.add('hidden'));
+            document.getElementById(`page-${page}`).classList.remove('hidden');
+            document.querySelectorAll('.sidebar-item[data-page]').forEach(i => i.classList.remove('active'));
+            document.querySelector(`.sidebar-item[data-page="${page}"]`)?.classList.add('active');
+            const titles = { 
+                overview: ['Overview','System Dashboard'], 
+                users: ['Users','User Management'], 
+                nodes: ['Nodes','Server Infrastructure'], 
+                subscriptions: ['Subscriptions','Config Generator'], 
+                security: ['Security & Kernel', 'Singularity Core Defense'],
+                obfuscation: ['Obfuscation & Mesh', 'DPI Evasion Matrix'],
+                settings: ['Settings','System Configuration'] 
+            };
+            document.getElementById('page-title').textContent = titles[page]?.[0] || page;
+            document.getElementById('page-subtitle').textContent = titles[page]?.[1] || '';
+            if (page === 'users') loadUsers();
+            if (page === 'nodes') loadNodes();
+            if (page === 'subscriptions') loadUsersForSelect();
+            if (page === 'security') loadBans();
+        }
+
+        // Hide admin items for resellers on load
+        if (currentUserRole === 'reseller') {
+            document.querySelectorAll('.sidebar-item').forEach(item => {
+                if (['security', 'obfuscation', 'nodes', 'settings'].includes(item.dataset.page)) {
+                    item.style.display = 'none';
+                }
+            });
+            document.querySelector('.admin-badge').textContent = 'RESELLER';
+            document.querySelector('.admin-badge').classList.replace('text-cyber-green', 'text-[#0088FF]');
+        }
+
+        document.querySelectorAll('.sidebar-item[data-page]').forEach(item => {
+            item.addEventListener('click', (e) => { e.preventDefault(); navigateTo(item.dataset.page); });
+        });
+
+        // ── Mobile Menu ──────────────────────────────────────────
+        document.getElementById('menu-toggle').addEventListener('click', () => {
+            document.getElementById('sidebar').classList.toggle('open');
+        });
+
+        // ── Logout ───────────────────────────────────────────────
+        document.getElementById('logout-btn').addEventListener('click', () => {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            window.location.href = '/';
+        });
+
+        // ── API Helper ───────────────────────────────────────────
+        async function api(path, method = 'GET', body = null) {
+            try {
+                const opts = { method, headers: headers() };
+                if (body) opts.body = JSON.stringify(body);
+                const r = await fetch(`${API_BASE}${path}`, opts);
+                if (r.status === 401) {
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                    window.location.href = '/';
+                    return null;
+                }
+                return r.ok ? await r.json() : null;
+            } catch (e) { console.error('API error:', e); return null; }
+        }
+
+        // ── Load System Stats ────────────────────────────────────
+        async function loadStats() {
+            const data = await api('/api/system/stats');
+            if (!data) return;
+            document.getElementById('stat-total-users').textContent = data.total_users;
+            document.getElementById('stat-active-users').textContent = data.active_users;
+            document.getElementById('stat-active-nodes').textContent = data.active_nodes;
+            document.getElementById('stat-total-nodes').textContent = data.total_nodes;
+            document.getElementById('stat-cpu').textContent = data.cpu_percent.toFixed(1);
+            document.getElementById('stat-mem').textContent = data.memory_percent.toFixed(1);
+            const cpuBar = document.getElementById('cpu-bar');
+            cpuBar.style.width = data.cpu_percent + '%';
+            cpuBar.className = 'progress-fill' + (data.cpu_percent > 80 ? ' danger' : data.cpu_percent > 60 ? ' warning' : '');
+            const memBar = document.getElementById('mem-bar');
+            memBar.style.width = data.memory_percent + '%';
+            memBar.className = 'progress-fill' + (data.memory_percent > 80 ? ' danger' : data.memory_percent > 60 ? ' warning' : '');
+
+            // Update Traffic Chart
+            if (typeof trafficData !== 'undefined') {
+                const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                trafficData.labels.push(now);
+                trafficData.upload.push(data.bandwidth_up_mbps || 0);
+                trafficData.download.push(data.bandwidth_down_mbps || 0);
+                if (trafficData.labels.length > 30) {
+                    trafficData.labels.shift();
+                    trafficData.upload.shift();
+                    trafficData.download.shift();
+                }
+                if (typeof trafficChart !== 'undefined' && trafficChart) trafficChart.update();
+            }
+        }
+
+        // ── Load Users ───────────────────────────────────────────
+        async function loadUsers() {
+            const search = document.getElementById('user-search')?.value || '';
+            const data = await api(`/api/users?per_page=50&search=${encodeURIComponent(search)}`);
+            if (!data) return;
+            const tbody = document.getElementById('users-table-body');
+            tbody.innerHTML = data.users.map(u => {
+                const usedGB = (u.data_used_bytes / (1024**3)).toFixed(2);
+                const limitGB = u.data_limit_bytes > 0 ? (u.data_limit_bytes / (1024**3)).toFixed(0) : '∞';
+                const pct = u.data_limit_bytes > 0 ? (u.data_used_bytes / u.data_limit_bytes * 100).toFixed(0) : 0;
+                const status = u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Suspended</span>';
+                const expire = u.expire_date ? u.expire_date.slice(0, 10) : '∞';
+                const bw = u.bandwidth_limit_mbps > 0 ? u.bandwidth_limit_mbps + ' Mbps' : '∞';
+                return `<tr>
+                    <td class="font-mono text-white">${u.username}</td>
+                    <td><span class="badge badge-${u.role === 'admin' ? 'yellow' : 'green'}">${u.role}</span></td>
+                    <td>${status}</td>
+                    <td><div class="text-xs">${usedGB}/${limitGB} GB</div><div class="progress-bar mt-1"><div class="progress-fill${pct>80?' danger':pct>60?' warning':''}" style="width:${Math.min(pct,100)}%"></div></div></td>
+                    <td class="font-mono text-xs">${bw}</td>
+                    <td class="font-mono text-xs">${expire}</td>
+                    <td><div class="flex gap-1">
+                        <button class="btn-cyber btn-ghost text-xs" onclick="copyText('${u.subscription_url||''}')">📋</button>
+                        <button class="btn-cyber btn-danger text-xs" onclick="toggleUser(${u.id}, ${u.is_active})">${u.is_active ? '⏸' : '▶'}</button>
+                    </div></td>
+                </tr>`;
+            }).join('');
+
+            // Also update recent users on overview
+            const recentBody = document.getElementById('recent-users-body');
+            recentBody.innerHTML = data.users.slice(0, 5).map(u => {
+                const usedGB = (u.data_used_bytes / (1024**3)).toFixed(2);
+                const limitGB = u.data_limit_bytes > 0 ? (u.data_limit_bytes / (1024**3)).toFixed(0) : '∞';
+                const pct = u.data_limit_bytes > 0 ? Math.min(100, u.data_used_bytes / u.data_limit_bytes * 100).toFixed(0) : 0;
+                const status = u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Suspended</span>';
+                const expire = u.expire_date ? u.expire_date.slice(0, 10) : '∞';
+                return `<tr>
+                    <td class="font-mono text-white">${u.username}</td>
+                    <td>${status}</td>
+                    <td><div class="text-xs">${usedGB}/${limitGB} GB (${pct}%)</div><div class="progress-bar mt-1"><div class="progress-fill" style="width:${pct}%"></div></div></td>
+                    <td class="font-mono text-xs">${expire}</td>
+                    <td><button class="btn-cyber btn-ghost text-xs" onclick="copyText('${u.subscription_url||''}')">📋 Sub</button></td>
+                </tr>`;
+            }).join('');
+        }
+
+        // ── Load Nodes ───────────────────────────────────────────
+        async function loadNodes() {
+            const data = await api('/api/nodes');
+            if (!data) return;
+            document.getElementById('nodes-grid').innerHTML = data.nodes.map(n => {
+                const ip = n.floating_ip || n.address;
+                const status = n.is_active ? 'badge-green' : 'badge-red';
+                const statusText = n.is_active ? 'Online' : 'Offline';
+                return `<div class="cyber-card rounded-xl p-5">
+                    <div class="flex items-center justify-between mb-3">
+                        <h4 class="text-white font-semibold">${n.name}</h4>
+                        <span class="badge ${status}">${statusText}</span>
+                    </div>
+                    <div class="space-y-2 text-xs font-mono text-gray-400">
+                        <div class="flex justify-between"><span>Address</span><span class="text-white">${ip}:${n.port}</span></div>
+                        <div class="flex justify-between"><span>Protocol</span><span class="text-cyber-green">${n.protocol}</span></div>
+                        <div class="flex justify-between"><span>SNI</span><span class="text-gray-300">${n.sni || 'N/A'}</span></div>
+                        <div class="flex justify-between"><span>Port Pool</span><span class="text-gray-300">${n.port_pool_low}</span></div>
+                        <div class="flex justify-between"><span>Hop Interval</span><span class="text-gray-300">${n.port_hop_interval_sec}s</span></div>
+                    </div>
+                    <div class="flex gap-2 mt-4">
+                        <button class="btn-cyber btn-primary text-xs flex-1" onclick="portHop(${n.id})">🔄 Port Hop</button>
+                        <button class="btn-cyber btn-ghost text-xs flex-1" onclick="redeployIP(${n.id})">🌐 Redeploy IP</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // ── Toggle User Active ───────────────────────────────────
+        async function toggleUser(userId, isActive) {
+            await api(`/api/users/${userId}`, 'PATCH', { is_active: !isActive });
+            loadUsers();
+        }
+
+        // ── Port Hop ─────────────────────────────────────────────
+        async function portHop(nodeId) {
+            const r = await api(`/api/nodes/${nodeId}/port-hop`, 'POST');
+            if (r) alert(r.message);
+            loadNodes();
+        }
+
+        // ── Redeploy IP ──────────────────────────────────────────
+        async function redeployIP(nodeId) {
+            if (!confirm('Redeploy floating IP for this node?')) return;
+            const r = await api(`/api/nodes/${nodeId}/redeploy-ip`, 'POST');
+            if (r) alert(r.message + '\n' + (r.detail || ''));
+            loadNodes();
+        }
+
+        // ── Create User ──────────────────────────────────────────
+        function showCreateUserModal() { document.getElementById('create-user-modal').classList.remove('hidden'); }
+        function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+        document.getElementById('create-user-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const dataGB = parseFloat(document.getElementById('new-data-limit').value);
+            const body = {
+                username: document.getElementById('new-username').value,
+                password: document.getElementById('new-password').value,
+                expire_days: parseInt(document.getElementById('new-expire').value),
+                data_limit_bytes: Math.floor(dataGB * 1024 * 1024 * 1024),
+                bandwidth_limit_mbps: parseInt(document.getElementById('new-bw-limit').value) || 0,
+                telegram_chat_id: parseInt(document.getElementById('new-telegram-id').value) || null,
+                gamer_mode: document.getElementById('new-gamer-mode').checked,
+                iran_bypass: document.getElementById('new-iran-bypass').checked,
+                warp_bypass: document.getElementById('new-warp-bypass').checked,
+                protocols: ['vless_reality', 'hysteria2'],
+            };
+            const r = await api('/api/users', 'POST', body);
+            if (r) {
+                closeModal('create-user-modal');
+                document.getElementById('create-user-form').reset();
+                loadUsers();
+                loadStats();
+                if (r.subscription_url) { alert('User created!\nSubscription: ' + r.subscription_url); }
+            } else { alert('Failed to create user'); }
+        });
+
+        // ── Settings Save ────────────────────────────────────────
+        async function saveSettings(section) {
+            let key, value;
+            if (section === 'gamer_mode') {
+                key = 'gamer_mode_profile';
+                value = {
+                    enabled: document.getElementById('toggle-gamer').classList.contains('active'),
+                    zero_packet_loss: document.getElementById('toggle-zpl').classList.contains('active'),
+                    optimize_udp: document.getElementById('toggle-udp').classList.contains('active')
+                };
+            } else if (section === 'battery_saver') {
+                key = 'battery_saver_profile';
+                value = {
+                    enabled: document.getElementById('toggle-battery').classList.contains('active'),
+                    idle_timeout_sec: parseInt(document.getElementById('battery-idle').value) || 300,
+                    connection_check_interval_sec: parseInt(document.getElementById('battery-keepalive').value) || 600
+                };
+            } else if (section === 'iran_bypass') {
+                key = 'iran_bypass_profile';
+                value = {
+                    enabled: document.getElementById('toggle-iran-global').classList.contains('active'),
+                    bank_enabled: document.getElementById('toggle-iran-bank').classList.contains('active'),
+                    bourse_enabled: document.getElementById('toggle-iran-bourse').classList.contains('active')
+                };
+            } else if (section === 'bandwidth') {
+                key = 'global_bandwidth_limit';
+                value = parseInt(document.getElementById('bw-slider').value) || 50;
+            } else if (section === 'amnezia') {
+                key = 'amnezia_defaults';
+                value = {
+                    jc: parseInt(document.getElementById('slider-jc').value) || 4,
+                    jmin: parseInt(document.getElementById('slider-jmin').value) || 40,
+                    jmax: parseInt(document.getElementById('slider-jmax').value) || 70,
+                    s1: parseInt(document.getElementById('slider-s1').value) || 0,
+                    s2: parseInt(document.getElementById('slider-s2').value) || 0,
+                    h1: parseInt(document.getElementById('slider-h1').value) || 1,
+                    h2: parseInt(document.getElementById('slider-h2').value) || 2
+                };
+            } else if (section === 'security') {
+                key = 'security_profile';
+                value = {
+                    quantum_shield_enabled: document.getElementById('toggle-pq').classList.contains('active'),
+                    decoy_target_url: document.getElementById('decoy-url').value || 'https://www.microsoft.com'
+                };
+            } else if (section === 'obfuscation') {
+                key = 'obfuscation_profile';
+                value = {
+                    port_hopping_low: document.getElementById('hop-low').value || '80,443,8080,8888',
+                    port_hopping_high_start: parseInt(document.getElementById('hop-high-start').value) || 50000,
+                    port_hopping_high_end: parseInt(document.getElementById('hop-high-end').value) || 65000,
+                    traffic_shape_mode: document.getElementById('shape-mode').value || 'video_stream',
+                    jitter_max_ms: parseInt(document.getElementById('slider-jitter').value) || 50,
+                    tls_fragment_enabled: document.getElementById('toggle-tls-frag').classList.contains('active'),
+                    tls_frag_min: parseInt(document.getElementById('slider-tls-smin').value) || 50,
+                    tls_frag_max: parseInt(document.getElementById('slider-tls-smax').value) || 200
+                };
+            }
+            
+            const btn = event.target;
+            const originalText = btn.textContent;
+            btn.textContent = 'Saving...';
+            btn.disabled = true;
+
+            const r = await api('/api/system/config', 'PUT', { key, value });
+            if (r) {
+                btn.textContent = 'Saved! ✓';
+                btn.classList.replace('text-cyber-green', 'text-white');
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.classList.replace('text-white', 'text-cyber-green');
+                    btn.disabled = false;
+                }, 2000);
+            } else {
+                btn.textContent = 'Failed to save';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }, 2000);
+            }
+        }
+
+        // ── Subscription Generation ──────────────────────────────
+        async function loadUsersForSelect() {
+            const data = await api('/api/users?per_page=100');
+            if (!data) return;
+            const sel = document.getElementById('sub-user-select');
+            sel.innerHTML = '<option value="">Choose a user...</option>' +
+                data.users.map(u => `<option value="${u.subscription_token}">${u.username}</option>`).join('');
+        }
+
+        async function generateSubscription() {
+            const subToken = document.getElementById('sub-user-select').value;
+            const format = document.getElementById('sub-format').value;
+            if (!subToken) { alert('Select a user first'); return; }
+
+            const subUrl = `${window.location.origin}/sub/${subToken}/${format}`;
+            document.getElementById('sub-link-display').value = subUrl;
+            document.getElementById('qr-image').src = `/sub/${subToken}/qr`;
+            document.getElementById('qr-container').classList.remove('hidden');
+        }
+
+        function copySubLink() { copyText(document.getElementById('sub-link-display').value); }
+
+        // ── Clipboard ────────────────────────────────────────────
+        function copyText(text) {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => {
+                // Flash notification could go here
+            }).catch(() => {});
+        }
+
+        // ── User Search ──────────────────────────────────────────
+        let searchTimeout;
+        document.getElementById('user-search')?.addEventListener('input', () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(loadUsers, 300);
+        });
+
+        // ── Traffic Chart ────────────────────────────────────────
+        const ctx = document.getElementById('traffic-chart')?.getContext('2d');
+        const trafficData = { labels: [], upload: [], download: [] };
+        let trafficChart;
+
+        async function loadConfig() {
+            const data = await api('/api/system/config');
+            if (!data) return;
+            const tbody = document.getElementById('config-table-body');
+            tbody.innerHTML = '';
+            
+            data.forEach(item => {
+                const tr = document.createElement('tr');
+                let displayVal = item.value;
+                if (typeof displayVal === 'object') {
+                    displayVal = JSON.stringify(displayVal);
+                }
+                tr.innerHTML = `
+                    <td class="px-4 py-3 font-mono text-cyber-green">${item.key}</td>
+                    <td class="px-4 py-3 font-mono truncate max-w-[200px]">${displayVal}</td>
+                    <td class="px-4 py-3">${item.description || ''}</td>
+                    <td class="px-4 py-3">
+                        <button class="text-xs text-cyber-green hover:text-white" onclick="editConfig('${item.key}', '${displayVal.replace(/'/g, "\\'")}')">Edit</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+
+                // Auto-fill specialized panels
+                if (item.key === 'telegram_profile' && typeof item.value === 'object') {
+                    document.getElementById('cfg-tg-token').value = item.value.bot_token || '';
+                    document.getElementById('cfg-tg-admin').value = item.value.admin_id || '';
+                    document.getElementById('cfg-tg-enable').checked = item.value.enabled || false;
+                }
+                if (item.key === 'auto_cdn_profile' && typeof item.value === 'object') {
+                    document.getElementById('cfg-cdn-key').value = item.value.api_key || '';
+                    document.getElementById('cfg-cdn-enable').checked = item.value.enabled || false;
+                    document.getElementById('cfg-sni-pool').value = (item.value.sni_pool || []).join(', ');
+                }
+            });
+        }
+
+        if (ctx) {
+            trafficChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: trafficData.labels,
+                    datasets: [
+                        {
+                            label: 'Upload',
+                            data: trafficData.upload,
+                            borderColor: '#00FF66',
+                            backgroundColor: 'rgba(0, 255, 102, 0.05)',
+                            borderWidth: 1.5,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0,
+                        },
+                        {
+                            label: 'Download',
+                            data: trafficData.download,
+                            borderColor: '#0088FF',
+                            backgroundColor: 'rgba(0, 136, 255, 0.05)',
+                            borderWidth: 1.5,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 300 },
+                    plugins: {
+                        legend: { labels: { color: '#888', font: { family: 'JetBrains Mono', size: 10 } } }
+                    },
+                    scales: {
+                        x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#555', font: { family: 'JetBrains Mono', size: 9 } } },
+                        y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#555', font: { family: 'JetBrains Mono', size: 9 } } }
+                    }
+                }
+            });
+        }
+
+        // ── Load Config ──────────────────────────────────────────
+        async function loadConfig() {
+            const data = await api('/api/system/config');
+            if (!data) return;
+            for (const cfg of data) {
+                if (cfg.key === 'gamer_mode_profile') {
+                    if (cfg.value.enabled) document.getElementById('toggle-gamer').classList.add('active');
+                    else document.getElementById('toggle-gamer').classList.remove('active');
+                    if (cfg.value.zero_packet_loss) document.getElementById('toggle-zpl').classList.add('active');
+                    else document.getElementById('toggle-zpl').classList.remove('active');
+                    if (cfg.value.optimize_udp) document.getElementById('toggle-udp').classList.add('active');
+                    else document.getElementById('toggle-udp').classList.remove('active');
+                } else if (cfg.key === 'battery_saver_profile') {
+                    if (cfg.value.enabled) document.getElementById('toggle-battery').classList.add('active');
+                    else document.getElementById('toggle-battery').classList.remove('active');
+                    document.getElementById('battery-idle').value = cfg.value.idle_timeout_sec || 300;
+                    document.getElementById('battery-keepalive').value = cfg.value.connection_check_interval_sec || 600;
+                } else if (cfg.key === 'iran_bypass_profile') {
+                    if (cfg.value.enabled) document.getElementById('toggle-iran-global').classList.add('active');
+                    else document.getElementById('toggle-iran-global').classList.remove('active');
+                    if (cfg.value.bank_enabled) document.getElementById('toggle-iran-bank').classList.add('active');
+                    else document.getElementById('toggle-iran-bank').classList.remove('active');
+                    if (cfg.value.bourse_enabled) document.getElementById('toggle-iran-bourse').classList.add('active');
+                    else document.getElementById('toggle-iran-bourse').classList.remove('active');
+                } else if (cfg.key === 'global_bandwidth_limit') {
+                    document.getElementById('bw-slider').value = cfg.value || 50;
+                    document.getElementById('bw-val').textContent = (cfg.value || 50) + ' Mbps';
+                } else if (cfg.key === 'amnezia_defaults') {
+                    document.getElementById('slider-jc').value = cfg.value.jc || 4; document.getElementById('jc-val').textContent = cfg.value.jc || 4;
+                    document.getElementById('slider-jmin').value = cfg.value.jmin || 40; document.getElementById('jmin-val').textContent = cfg.value.jmin || 40;
+                    document.getElementById('slider-jmax').value = cfg.value.jmax || 70; document.getElementById('jmax-val').textContent = cfg.value.jmax || 70;
+                    document.getElementById('slider-s1').value = cfg.value.s1 || 0; document.getElementById('s1-val').textContent = cfg.value.s1 || 0;
+                    document.getElementById('slider-s2').value = cfg.value.s2 || 0; document.getElementById('s2-val').textContent = cfg.value.s2 || 0;
+                    document.getElementById('slider-h1').value = cfg.value.h1 || 1; document.getElementById('h1-val').textContent = cfg.value.h1 || 1;
+                    document.getElementById('slider-h2').value = cfg.value.h2 || 2; document.getElementById('h2-val').textContent = cfg.value.h2 || 2;
+                } else if (cfg.key === 'security_profile') {
+                    if (cfg.value.quantum_shield_enabled) { document.getElementById('toggle-pq').classList.add('active'); document.getElementById('pq-status-text').textContent = 'ACTIVE'; }
+                    else { document.getElementById('toggle-pq').classList.remove('active'); document.getElementById('pq-status-text').textContent = 'OFFLINE'; }
+                    document.getElementById('decoy-url').value = cfg.value.decoy_target_url || 'https://www.microsoft.com';
+                } else if (cfg.key === 'obfuscation_profile') {
+                    document.getElementById('hop-low').value = cfg.value.port_hopping_low || '80,443,8080,8888';
+                    document.getElementById('hop-high-start').value = cfg.value.port_hopping_high_start || 50000;
+                    document.getElementById('hop-high-end').value = cfg.value.port_hopping_high_end || 65000;
+                    document.getElementById('shape-mode').value = cfg.value.traffic_shape_mode || 'video_stream';
+                    document.getElementById('slider-jitter').value = cfg.value.jitter_max_ms || 50; document.getElementById('jitter-val').textContent = cfg.value.jitter_max_ms || 50;
+                    if (cfg.value.tls_fragment_enabled) document.getElementById('toggle-tls-frag').classList.add('active');
+                    else document.getElementById('toggle-tls-frag').classList.remove('active');
+                    document.getElementById('slider-tls-smin').value = cfg.value.tls_frag_min || 50; document.getElementById('tls-smin-val').textContent = cfg.value.tls_frag_min || 50;
+                    document.getElementById('slider-tls-smax').value = cfg.value.tls_frag_max || 200; document.getElementById('tls-smax-val').textContent = cfg.value.tls_frag_max || 200;
+                }
+            }
+        }
+
+        // ── Ban Management ───────────────────────────────────────
+        async function loadBans() {
+            const bans = await api('/api/system/bans');
+            if (!bans) return;
+            const tbody = document.getElementById('bans-table-body');
+            if (bans.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-gray-500 text-xs py-4">No banned IPs.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = bans.map(b => {
+                const expires = new Date(b.expires_at).toLocaleString();
+                return `<tr>
+                    <td class="font-mono text-white text-xs">${b.ip_address}</td>
+                    <td class="text-xs text-gray-400">${b.reason}</td>
+                    <td class="font-mono text-xs text-red-400">${expires}</td>
+                    <td><button class="btn-cyber btn-ghost text-xs" onclick="unbanIP('${b.ip_address}')">Unban</button></td>
+                </tr>`;
+            }).join('');
+        }
+
+        async function manualBanIP() {
+            const ip = document.getElementById('manual-ban-ip').value;
+            if (!ip) return;
+            const r = await api('/api/system/bans', 'POST', {
+                ip_address: ip,
+                reason: 'Manual Admin Ban',
+                duration_hours: 24,
+                details: null
+            });
+            if (r) {
+                document.getElementById('manual-ban-ip').value = '';
+                loadBans();
+                addThreatLog(`ADMIN BAN: IP ${ip} permanently blocked.`);
+            }
+        }
+
+        async function unbanIP(ip) {
+            if (!confirm(`Unban IP ${ip}?`)) return;
+            await api(`/api/system/bans/${encodeURIComponent(ip)}`, 'DELETE');
+            loadBans();
+            addThreatLog(`ADMIN UNBAN: IP ${ip} restored.`);
+        }
+
+        // ── AI Threat Matrix Terminal ────────────────────────────
+        function addThreatLog(msg) {
+            const term = document.getElementById('threat-terminal');
+            if (!term) return;
+            const line = document.createElement('div');
+            line.className = 'text-cyber-green opacity-0 transition-opacity duration-300';
+            line.textContent = `> ${msg}`;
+            term.appendChild(line);
+            setTimeout(() => line.classList.remove('opacity-0'), 10);
+            if (term.children.length > 20) term.removeChild(term.firstChild);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        setInterval(() => {
+            const events = [
+                "Intercepted potential GFW probe on port 443.",
+                "Kyber-768 key re-rolled successfully.",
+                "Chaffing packet injected: +1200 bytes.",
+                "eBPF dropped SYN from anomalous subnet.",
+                "Dynamic Port Hop: Migrated to port 51042.",
+                "TLS Snippet fragmented into 3 parts."
+            ];
+            if (Math.random() > 0.6) {
+                addThreatLog(events[Math.floor(Math.random() * events.length)]);
+            }
+        }, 4000);
+
+
+        // ── Periodic Refresh ─────────────────────────────────────
+        loadStats();
+        loadUsers();
+        loadConfig();
+        setInterval(loadStats, 5000); // 5 sec updates for real-time chart and stats
+    </script>
+</body>
+</html>

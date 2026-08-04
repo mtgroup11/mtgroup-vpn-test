@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MTGroup VPN | Subscription</title>
+  
+  <link rel="stylesheet" href="/static/css/cyberpunk.css">
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  
+  <script>
+    const i18n_dict = {
+      en: {
+        "title_sub": "Client Subscription",
+        "lbl_qrcode": "Scan QR Code",
+        "tab_v2rayng": "v2rayNG (Android)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (PC)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "COPY",
+        "msg_copied": "COPIED!",
+        "lbl_expires": "Expires On:",
+        "lbl_quota": "Remaining Quota:"
+      },
+      tr: {
+        "title_sub": "Müşteri Aboneliği",
+        "lbl_qrcode": "QR Kodu Okutun",
+        "tab_v2rayng": "v2rayNG (Android)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (PC)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "KOPYALA",
+        "msg_copied": "KOPYALANDI!",
+        "lbl_expires": "Bitiş Tarihi:",
+        "lbl_quota": "Kalan Kota:"
+      },
+      fa: {
+        "title_sub": "اشتراک مشتری",
+        "lbl_qrcode": "اسکن کد QR",
+        "tab_v2rayng": "v2rayNG (اندروید)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (PC)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "کپی",
+        "msg_copied": "کپی شد!",
+        "lbl_expires": "تاریخ انقضا:",
+        "lbl_quota": "حجم باقیمانده:"
+      },
+      ar: {
+        "title_sub": "اشتراك العميل",
+        "lbl_qrcode": "امسح رمز الاستجابة السريعة",
+        "tab_v2rayng": "v2rayNG (أندرويد)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (حاسوب)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "نسخ",
+        "msg_copied": "تم النسخ!",
+        "lbl_expires": "ينتهي في:",
+        "lbl_quota": "الحصة المتبقية:"
+      },
+      ru: {
+        "title_sub": "Подписка клиента",
+        "lbl_qrcode": "Сканировать QR-код",
+        "tab_v2rayng": "v2rayNG (Android)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (PC)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "КОПИРОВАТЬ",
+        "msg_copied": "СКОПИРОВАНО!",
+        "lbl_expires": "Действует до:",
+        "lbl_quota": "Оставшаяся квота:"
+      },
+      zh: {
+        "title_sub": "客户订阅",
+        "lbl_qrcode": "扫描二维码",
+        "tab_v2rayng": "v2rayNG (安卓)",
+        "tab_singbox": "Sing-box",
+        "tab_nekobox": "Nekobox (电脑)",
+        "tab_amnezia": "AmneziaWG",
+        "btn_copy": "复制",
+        "msg_copied": "已复制!",
+        "lbl_expires": "到期时间:",
+        "lbl_quota": "剩余流量:"
+      }
+    };
+
+    function applyLanguage(lang) {
+      if (!i18n_dict[lang]) lang = "en";
+      
+      const isRtl = (lang === "fa" || lang === "ar");
+      document.documentElement.setAttribute("dir", isRtl ? "rtl" : "ltr");
+      document.documentElement.setAttribute("lang", lang);
+      localStorage.setItem("mtgroup_lang", lang);
+
+      document.getElementById("lang-select").value = lang;
+
+      document.querySelectorAll("[data-i18n]").forEach(el => {
+        const key = el.getAttribute("data-i18n");
+        if (i18n_dict[lang][key]) {
+          // Keep internal structure intact if present
+          if(el.tagName === "BUTTON" && el.querySelector('span')) {
+            // Wait, just innerText overrides the whole thing. Be careful.
+             el.innerText = i18n_dict[lang][key];
+          } else {
+             el.innerText = i18n_dict[lang][key];
+          }
+        }
+      });
+    }
+
+    function switchTab(tabId) {
+      // Hide all content
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      // Deactivate all buttons
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      
+      // Activate selected
+      document.getElementById(tabId).classList.add('active');
+      document.querySelector(`button[onclick="switchTab('${tabId}')"]`).classList.add('active');
+    }
+
+    function copyText(btn, text) {
+      navigator.clipboard.writeText(text).then(() => {
+        const originalText = btn.innerText;
+        const currentLang = localStorage.getItem("mtgroup_lang") || "en";
+        btn.innerText = i18n_dict[currentLang]["msg_copied"] || "COPIED!";
+        btn.style.background = "var(--neon-green)";
+        btn.style.color = "var(--bg-deep)";
+        
+        setTimeout(() => {
+          btn.innerText = originalText;
+          btn.style.background = "";
+          btn.style.color = "";
+        }, 2000);
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      let savedLang = localStorage.getItem("mtgroup_lang");
+      if (!savedLang) {
+        const browserLang = navigator.language.split("-")[0];
+        savedLang = i18n_dict[browserLang] ? browserLang : "en";
+      }
+      applyLanguage(savedLang);
+    });
+  </script>
+</head>
+<body>
+
+  <select id="lang-select" class="lang-selector" onchange="applyLanguage(this.value)">
+    <option value="en">ENG</option>
+    <option value="tr">TÜRKÇE</option>
+    <option value="fa">فارسی</option>
+    <option value="ar">العربية</option>
+    <option value="ru">РУССКИЙ</option>
+    <option value="zh">中文</option>
+  </select>
+
+  <div class="container">
+    <h1 class="text-neon-green" style="margin-block-end: var(--spacing-lg); text-align: center;" data-i18n="title_sub">Client Subscription</h1>
+
+    <!-- User Info Card -->
+    <div class="panel" style="text-align: center;">
+      <h3 class="text-cyber-blue">{{ user.username }}</h3>
+      <p class="text-muted" style="margin-block-start: var(--spacing-sm);">
+        <span data-i18n="lbl_expires">Expires On:</span> <strong class="text-danger">{{ user.expires_at | default('NEVER', true) }}</strong> <br>
+        <span data-i18n="lbl_quota">Remaining Quota:</span> <strong>{{ user.quota_bytes | default('Unlimited', true) }}</strong>
+      </p>
+    </div>
+
+    <!-- QR Code Section -->
+    <div class="qr-container">
+      <div style="text-align: center;">
+        <div style="margin-block-end: var(--spacing-sm);" class="text-neon-green" data-i18n="lbl_qrcode">Scan QR Code</div>
+        <!-- Injected via Jinja2: base64 image or generated via JS -->
+        {% if qr_code_base64 %}
+        <img src="data:image/png;base64,{{ qr_code_base64 }}" alt="QR Code" style="border: 4px solid var(--neon-green); padding: 5px; background: white; max-width: 250px;">
+        {% else %}
+        <div style="width: 200px; height: 200px; border: 2px dashed var(--neon-green); display: flex; align-items: center; justify-content: center; color: var(--neon-green);">
+          [ QR CODE HERE ]
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Device Tabs -->
+    <div class="panel">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('v2rayng')" data-i18n="tab_v2rayng">v2rayNG</button>
+        <button class="tab-btn" onclick="switchTab('singbox')" data-i18n="tab_singbox">Sing-box</button>
+        <button class="tab-btn" onclick="switchTab('nekobox')" data-i18n="tab_nekobox">Nekobox</button>
+        <button class="tab-btn" onclick="switchTab('amnezia')" data-i18n="tab_amnezia">AmneziaWG</button>
+      </div>
+
+      <!-- v2rayNG Content -->
+      <div id="v2rayng" class="tab-content active">
+        {% for link in links.get('v2rayng', []) %}
+        <div class="url-box">
+          <div class="url-text">{{ link }}</div>
+          <button class="url-copy" onclick="copyText(this, '{{ link }}')" data-i18n="btn_copy">COPY</button>
+        </div>
+        {% else %}
+        <p class="text-muted">No configurations available for this device.</p>
+        {% endfor %}
+      </div>
+
+      <!-- Sing-box Content -->
+      <div id="singbox" class="tab-content">
+        {% for link in links.get('singbox', []) %}
+        <div class="url-box">
+          <div class="url-text">{{ link }}</div>
+          <button class="url-copy" onclick="copyText(this, '{{ link }}')" data-i18n="btn_copy">COPY</button>
+        </div>
+        {% else %}
+        <p class="text-muted">No configurations available for this device.</p>
+        {% endfor %}
+      </div>
+
+      <!-- Nekobox Content -->
+      <div id="nekobox" class="tab-content">
+        {% for link in links.get('nekobox', []) %}
+        <div class="url-box">
+          <div class="url-text">{{ link }}</div>
+          <button class="url-copy" onclick="copyText(this, '{{ link }}')" data-i18n="btn_copy">COPY</button>
+        </div>
+        {% else %}
+        <p class="text-muted">No configurations available for this device.</p>
+        {% endfor %}
+      </div>
+
+      <!-- AmneziaWG Content -->
+      <div id="amnezia" class="tab-content">
+        {% for link in links.get('amnezia', []) %}
+        <div class="url-box">
+          <div class="url-text">{{ link }}</div>
+          <button class="url-copy" onclick="copyText(this, '{{ link }}')" data-i18n="btn_copy">COPY</button>
+        </div>
+        {% else %}
+        <p class="text-muted">No configurations available for this device.</p>
+        {% endfor %}
+      </div>
+
+    </div>
+
+  </div>
+</body>
+</html>

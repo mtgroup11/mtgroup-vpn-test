@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="MTGroup VPN Ultimate — Next-generation VPN management panel">
+    <title>MTGroup VPN Ultimate — Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        cyber: {
+                            green: '#00FF66',
+                            dark: '#000000',
+                            card: '#0a0a0a',
+                            border: '#1a1a1a',
+                            hover: '#0d3320',
+                        }
+                    },
+                    fontFamily: {
+                        mono: ['JetBrains Mono', 'monospace'],
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-black min-h-screen flex items-center justify-center font-sans overflow-hidden">
+    <!-- Animated Grid Background -->
+    <div class="fixed inset-0 z-0">
+        <div class="grid-bg absolute inset-0"></div>
+        <div class="scan-line absolute inset-0"></div>
+    </div>
+
+    <!-- Floating Particles -->
+    <div id="particles" class="fixed inset-0 z-0 pointer-events-none"></div>
+
+    <!-- Login Card -->
+    <div class="relative z-10 w-full max-w-md mx-4">
+        <!-- ASCII Art Logo -->
+        <div class="text-center mb-8">
+            <pre class="text-cyber-green font-mono text-xs sm:text-sm leading-tight inline-block glow-text select-none" aria-hidden="true">
+███╗   ███╗████████╗ ██████╗ ██████╗  ██████╗ ██╗   ██╗██████╗
+████╗ ████║╚══██╔══╝██╔════╝ ██╔══██╗██╔═══██╗██║   ██║██╔══██╗
+██╔████╔██║   ██║   ██║  ███╗██████╔╝██║   ██║██║   ██║██████╔╝
+██║╚██╔╝██║   ██║   ██║   ██║██╔══██╗██║   ██║██║   ██║██╔═══╝
+██║ ╚═╝ ██║   ██║   ╚██████╔╝██║  ██║╚██████╔╝╚██████╔╝██║
+╚═╝     ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝
+            </pre>
+            <p class="text-cyber-green/60 font-mono text-xs mt-2 tracking-[0.3em] uppercase">
+                VPN Ultimate — Doomsday Ecosystem
+            </p>
+        </div>
+
+        <!-- Login Form -->
+        <div class="cyber-card rounded-xl p-8 backdrop-blur-xl" id="login-card">
+            <div class="flex items-center gap-3 mb-6">
+                <div class="w-2 h-2 rounded-full bg-cyber-green animate-pulse"></div>
+                <h1 class="text-white font-semibold text-lg">Secure Access</h1>
+            </div>
+
+            <form id="login-form" class="space-y-5" autocomplete="off">
+                <div>
+                    <label for="username" class="block text-gray-400 text-sm font-mono mb-2">USERNAME</label>
+                    <div class="relative">
+                        <input
+                            type="text"
+                            id="username"
+                            name="username"
+                            required
+                            class="w-full bg-black/50 border border-cyber-border rounded-lg px-4 py-3 text-white font-mono text-sm focus:border-cyber-green focus:ring-1 focus:ring-cyber-green/50 outline-none transition-all duration-300 placeholder-gray-600"
+                            placeholder="admin"
+                            autocomplete="username"
+                        >
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2">
+                            <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label for="password" class="block text-gray-400 text-sm font-mono mb-2">PASSWORD</label>
+                    <div class="relative">
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            required
+                            class="w-full bg-black/50 border border-cyber-border rounded-lg px-4 py-3 text-white font-mono text-sm focus:border-cyber-green focus:ring-1 focus:ring-cyber-green/50 outline-none transition-all duration-300 placeholder-gray-600"
+                            placeholder="••••••••••"
+                            autocomplete="current-password"
+                        >
+                        <button type="button" id="toggle-password" class="absolute right-3 top-1/2 -translate-y-1/2" aria-label="Toggle password visibility">
+                            <svg class="w-4 h-4 text-gray-600 hover:text-cyber-green transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Error Message -->
+                <div id="error-msg" class="hidden text-red-400 text-sm font-mono bg-red-900/20 border border-red-900/30 rounded-lg px-4 py-2">
+                </div>
+
+                <button
+                    type="submit"
+                    id="login-btn"
+                    class="w-full bg-cyber-green/10 border border-cyber-green/30 text-cyber-green font-semibold py-3 rounded-lg hover:bg-cyber-green/20 hover:border-cyber-green/60 transition-all duration-300 font-mono text-sm tracking-wider uppercase relative overflow-hidden group"
+                >
+                    <span class="relative z-10 flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                        </svg>
+                        <span id="btn-text">AUTHENTICATE</span>
+                    </span>
+                    <div class="absolute inset-0 bg-gradient-to-r from-transparent via-cyber-green/10 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700"></div>
+                </button>
+            </form>
+
+            <!-- System Status -->
+            <div class="mt-6 pt-4 border-t border-cyber-border">
+                <div class="flex items-center justify-between text-xs font-mono">
+                    <span class="text-gray-600">SYSTEM STATUS</span>
+                    <span class="flex items-center gap-1.5">
+                        <span class="w-1.5 h-1.5 rounded-full bg-cyber-green animate-pulse"></span>
+                        <span class="text-cyber-green/80">OPERATIONAL</span>
+                    </span>
+                </div>
+                <div class="flex items-center justify-between text-xs font-mono mt-1">
+                    <span class="text-gray-600">ENCRYPTION</span>
+                    <span class="text-gray-500">TLS 1.3 / AES-256-GCM</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <p class="text-center text-gray-700 text-xs font-mono mt-6">
+            MTGroup VPN Ultimate v1.0.0 — Doomsday Ecosystem
+        </p>
+    </div>
+
+    <script>
+        // ── Particles Animation ──────────────────────────────────
+        const particleContainer = document.getElementById('particles');
+        function createParticle() {
+            const particle = document.createElement('div');
+            particle.classList.add('particle');
+            particle.style.left = Math.random() * 100 + '%';
+            particle.style.animationDuration = (Math.random() * 6 + 4) + 's';
+            particle.style.animationDelay = Math.random() * 4 + 's';
+            particle.style.opacity = Math.random() * 0.5 + 0.1;
+            particleContainer.appendChild(particle);
+            setTimeout(() => particle.remove(), 10000);
+        }
+        setInterval(createParticle, 400);
+
+        // ── Password Toggle ──────────────────────────────────────
+        const toggleBtn = document.getElementById('toggle-password');
+        const passwordInput = document.getElementById('password');
+        toggleBtn.addEventListener('click', () => {
+            passwordInput.type = passwordInput.type === 'password' ? 'text' : 'password';
+        });
+
+        // ── Login Form ───────────────────────────────────────────
+        const form = document.getElementById('login-form');
+        const errorMsg = document.getElementById('error-msg');
+        const loginBtn = document.getElementById('login-btn');
+        const btnText = document.getElementById('btn-text');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errorMsg.classList.add('hidden');
+            btnText.textContent = 'AUTHENTICATING...';
+            loginBtn.disabled = true;
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    localStorage.setItem('access_token', data.access_token);
+                    localStorage.setItem('refresh_token', data.refresh_token);
+
+                    btnText.textContent = 'ACCESS GRANTED ✓';
+                    loginBtn.classList.add('border-green-500', 'text-green-400');
+
+                    // Glitch effect on success
+                    document.getElementById('login-card').classList.add('glitch-success');
+
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 800);
+                } else {
+                    const err = await response.json();
+                    errorMsg.textContent = `⚠ ${err.detail || 'Authentication failed'}`;
+                    errorMsg.classList.remove('hidden');
+
+                    // Shake animation
+                    document.getElementById('login-card').classList.add('shake');
+                    setTimeout(() => {
+                        document.getElementById('login-card').classList.remove('shake');
+                    }, 600);
+                }
+            } catch (err) {
+                errorMsg.textContent = '⚠ Connection failed. Server unreachable.';
+                errorMsg.classList.remove('hidden');
+            } finally {
+                loginBtn.disabled = false;
+                if (btnText.textContent === 'AUTHENTICATING...') {
+                    btnText.textContent = 'AUTHENTICATE';
+                }
+            }
+        });
+
+        // ── Redirect if already authenticated ────────────────────
+        if (localStorage.getItem('access_token')) {
+            fetch('/api/auth/me', {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('access_token')}` }
+            }).then(r => {
+                if (r.ok) {
+                    window.location.href = '/dashboard';
+                } else {
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                }
+            }).catch(() => {
+                localStorage.removeItem('access_token');
+                localStorage.removeItem('refresh_token');
+            });
+        }
+    </script>
+</body>
+</html>
