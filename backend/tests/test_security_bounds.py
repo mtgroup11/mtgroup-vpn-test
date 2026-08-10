@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 
 from backend.app.core.security import (
     HandshakeTracker,

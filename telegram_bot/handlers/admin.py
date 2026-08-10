@@ -1,12 +1,12 @@
 import io
 import matplotlib.pyplot as plt
 from telegram import Update, InputFile
-from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 from ..utils.api_client import api
-from ..utils.config import ADMIN_ID, logger
-from ..utils.keyboards import get_admin_menu, get_confirmation_menu, get_user_manage_menu
+from ..utils.config import ADMIN_ID
+from ..utils.keyboards import get_admin_menu
 
 BROADCAST_MSG = 1
 

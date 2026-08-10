@@ -7,9 +7,7 @@ from __future__ import annotations
 
 
 import pytest
-from httpx import AsyncClient
 
-from backend.app.models import NodeProtocol, UserRole
 from backend.tests.conftest import get_admin_token
 
 

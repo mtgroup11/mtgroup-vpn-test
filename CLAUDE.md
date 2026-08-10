@@ -52,7 +52,9 @@ make
 
 CI (`.github/workflows/ci.yml`) runs on Python 3.11 and 3.12: ruff → mypy (non-blocking) → `backend/tests/` → `test_ebpf.py` → `telegram_bot/tests_bot.py` → coverage gate (**blocking**, currently 82%) → bandit (**blocking**, currently 0 findings) / safety (non-blocking, separate job).
 
-Two known pre-existing CI failures unrelated to any current work: `telegram_bot/tests_bot.py` has a relative-import error, and `ruff check` reports ~35 errors (mostly unused imports in `telegram_bot/handlers/*.py`). Both are in `telegram_bot/`, both predate the backend hardening work — don't assume your change caused them; verify with `git stash` first.
+All five gates are green as of 2026-08-10 — if one goes red, it's something you changed. Note bandit and the coverage gate are both blocking now, so **re-run `bandit` and the coverage gate after adding test files too**, not just production code: test fixtures with `/tmp` paths or `"0.0.0.0"` literals will trip bandit's heuristics (annotate with `# nosec BXXX - reason` or avoid the literal).
+
+`telegram_bot/` is a proper Python package (it has `__init__.py` files and uses package-relative imports throughout). Run it with `python -m telegram_bot.bot` from the repo root, **not** `python bot.py` from inside the directory — the latter was the old script-style layout and no longer works. Note this standalone bot tree is not referenced by `Dockerfile`/`docker-compose.yml`/`install.sh` at all; the bot that actually ships is `backend/app/telegram_bot.py`, which is a separate implementation.
 
 ## Architecture
 

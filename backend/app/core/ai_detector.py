@@ -11,7 +11,6 @@ anomalies (DPI probes, bot-nets) and trigger Fast-Track Defenses.
 import asyncio
 import logging
 import math
-import random
 import socket
 import struct
 import httpx
@@ -190,7 +189,8 @@ class AnomalyPredictor:
                 
                 # Calculate delta
                 delta = current_bytes - self.last_bytes[ip_addr]
-                if delta < 0: delta = current_bytes # Map was cleared
+                if delta < 0:
+                    delta = current_bytes  # Map was cleared
                 self.last_bytes[ip_addr] = current_bytes
                 
                 # Features

@@ -14,7 +14,7 @@ class TestBotHelpers:
     """Test bot utility functions."""
 
     def test_panel_api_client_init(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://localhost:8443")
         assert client.base_url == "http://localhost:8443"
@@ -22,7 +22,7 @@ class TestBotHelpers:
 
     def test_admin_only_decorator(self):
         """Test that admin_only decorator blocks non-admin users."""
-        from telegram_bot.bot import ADMIN_ID
+        from telegram_bot.utils.config import ADMIN_ID
 
         # When ADMIN_ID is 0, no one is admin by default
         assert isinstance(ADMIN_ID, int)
@@ -56,7 +56,7 @@ class TestAPIClientMethods:
 
     @pytest.mark.asyncio
     async def test_authenticate_success(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://test")
         mock_response = MagicMock()
@@ -74,7 +74,7 @@ class TestAPIClientMethods:
 
     @pytest.mark.asyncio
     async def test_authenticate_failure(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://test")
         mock_response = MagicMock()
@@ -89,7 +89,7 @@ class TestAPIClientMethods:
 
     @pytest.mark.asyncio
     async def test_get_with_auth(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://test")
         client._token = "valid_token"
@@ -106,7 +106,7 @@ class TestAPIClientMethods:
 
     @pytest.mark.asyncio
     async def test_post_create_user(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://test")
         client._token = "valid_token"
@@ -129,7 +129,7 @@ class TestAPIClientMethods:
 
     @pytest.mark.asyncio
     async def test_connection_error(self):
-        from telegram_bot.bot import PanelAPIClient
+        from telegram_bot.utils.api_client import PanelAPIClient
 
         client = PanelAPIClient("http://test")
         client._token = "valid_token"

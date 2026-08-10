@@ -6,12 +6,8 @@ If a block is detected (GFW/DPI interference), switches to a clean IP / fallback
 
 import asyncio
 import logging
-import httpx
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from backend.app.core.config import settings
-from backend.app.models import Node, SystemConfig
 
 logger = logging.getLogger("mtgroup.auto_cdn")
 

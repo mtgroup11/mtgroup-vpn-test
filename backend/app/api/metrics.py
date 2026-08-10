@@ -190,34 +190,25 @@ def calculate_connection_quality(
 
 async def trigger_autonomous_shield(risk_score: int):
     """
-    Mini Event Manager: Triggers shield if risk is critical.
-    Writes to AuditLog and SystemSnapshot.
+    Mini Event Manager: fires when the computed risk score goes critical.
+
+    NOTE: this currently only logs. It does **not** persist anything.
+    It previously built an ``AuditLog`` row and a ``SystemSnapshot`` row
+    and then discarded both (the session.add/commit calls were commented
+    out), while logging "Autonomous action recorded in AuditLog and
+    SystemSnapshot" — i.e. it claimed an audit trail that did not exist.
+    The dead construction was removed and the log corrected rather than
+    left to mislead whoever reads these logs during an incident.
+
+    To finish this properly, ``get_metrics_dashboard`` needs a
+    ``db: AsyncSession = Depends(get_db)`` and must pass a session in
+    here so the AuditLog/SystemSnapshot rows can actually be committed.
     """
-    from backend.app.models import AuditLog, SystemSnapshot
-    from datetime import datetime, timezone
-    
-    logger.critical(f"🛡️ AUTONOMOUS SHIELD ACTIVATED! Risk Score: {risk_score}")
-    
-    audit_entry = AuditLog(
-        timestamp=datetime.now(timezone.utc),
-        operator_role="System",
-        action_type="AUTONOMOUS_SHIELD_ACTIVATED",
-        details=f"Risk score reached critical level ({risk_score}/100). Auto-lockdown engaged."
+    logger.critical(
+        "🛡️ AUTONOMOUS SHIELD ACTIVATED! Risk Score: %d/100 — "
+        "NOT persisted to AuditLog/SystemSnapshot (not yet wired to a DB session)",
+        risk_score,
     )
-    
-    snapshot = SystemSnapshot(
-        timestamp=datetime.now(timezone.utc),
-        preset_name="Auto-Lockdown",
-        config_json=json.dumps({"mode": "lockdown", "ebpf_strict": True, "killswitch": "armed"}),
-        health_score=100 - risk_score,
-        active_users_count=0 
-    )
-    
-    # In a full integration, these would be added to the active db session:
-    # session.add(audit_entry)
-    # session.add(snapshot)
-    # await session.commit()
-    logger.info("Autonomous action recorded in AuditLog and SystemSnapshot.")
 
 
 @router.get("/dashboard")

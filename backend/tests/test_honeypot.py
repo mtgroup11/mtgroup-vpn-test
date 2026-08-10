@@ -156,8 +156,8 @@ class TestStartStop:
     async def test_start_generates_cert_and_binds_server(self, monkeypatch):
         engine = HoneypotEngine(host="127.0.0.1", port=8080)
         monkeypatch.setattr(engine, "_generate_self_signed_cert", AsyncMock())
-        engine._cert_path = "/tmp/fake.crt"
-        engine._key_path = "/tmp/fake.key"
+        engine._cert_path = "/nonexistent/fake.crt"
+        engine._key_path = "/nonexistent/fake.key"
 
         fake_ssl_context = MagicMock()
         monkeypatch.setattr(
@@ -169,7 +169,7 @@ class TestStartStop:
         await engine.start()
 
         engine._generate_self_signed_cert.assert_awaited_once()
-        fake_ssl_context.load_cert_chain.assert_called_once_with(certfile="/tmp/fake.crt", keyfile="/tmp/fake.key")
+        fake_ssl_context.load_cert_chain.assert_called_once_with(certfile="/nonexistent/fake.crt", keyfile="/nonexistent/fake.key")
         start_server_mock.assert_awaited_once()
         assert engine._is_running is True
 

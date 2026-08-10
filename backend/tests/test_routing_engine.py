@@ -462,7 +462,7 @@ class TestSNIMultiplexerStartStop:
         mux = SNIMultiplexer(listen_port=0)
         fake_server = MagicMock()
         fake_sock = MagicMock()
-        fake_sock.getsockname.return_value = ("0.0.0.0", 443)
+        fake_sock.getsockname.return_value = ("0.0.0.0", 443)  # nosec B104 - mocked return value, not a real bind
         fake_server.sockets = [fake_sock]
 
         start_server_mock = AsyncMock(return_value=fake_server)

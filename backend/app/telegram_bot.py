@@ -4,7 +4,6 @@ Provides a fully automated bot for users to check subscription status,
 and for admins to receive AI Threat Matrix alerts.
 """
 
-import asyncio
 import logging
 import json
 from sqlalchemy import select

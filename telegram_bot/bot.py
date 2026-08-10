@@ -17,18 +17,18 @@ from telegram.ext import (
     filters
 )
 
-from utils.config import BOT_TOKEN, ADMIN_ID, logger
-from utils.api_client import api
-from utils.keyboards import get_main_menu
+from .utils.config import BOT_TOKEN, ADMIN_ID, logger
+from .utils.api_client import api
+from .utils.keyboards import get_main_menu
 
 # Import handlers
-from handlers.user import user_callback_handler
-from handlers.admin import (
+from .handlers.user import user_callback_handler
+from .handlers.admin import (
     admin_callback_handler, 
     is_admin,
     BROADCAST_MSG, broadcast_start, broadcast_receive, broadcast_cancel
 )
-from handlers.reseller import (
+from .handlers.reseller import (
     reseller_callback_handler,
     ADD_CUST_USERNAME, ADD_CUST_PASSWORD, ADD_CUST_DATA,
     add_cust_start, add_cust_username, add_cust_password, add_cust_data
@@ -84,13 +84,16 @@ async def telemetry_monitor(app: Application) -> None:
     while True:
         try:
             await asyncio.sleep(300)
-            if not ADMIN_ID: continue
+            if not ADMIN_ID:
+                continue
             
             stats = await api.get("/api/system/stats")
             if stats:
                 alerts = []
-                if stats["cpu_percent"] > 90: alerts.append(f"🔴 CPU at {stats['cpu_percent']:.0f}%")
-                if stats["memory_percent"] > 90: alerts.append(f"🔴 RAM at {stats['memory_percent']:.0f}%")
+                if stats["cpu_percent"] > 90:
+                    alerts.append(f"🔴 CPU at {stats['cpu_percent']:.0f}%")
+                if stats["memory_percent"] > 90:
+                    alerts.append(f"🔴 RAM at {stats['memory_percent']:.0f}%")
                 
                 if alerts:
                     msg = "⚠️ *System Alert*\n━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(alerts)

@@ -14,7 +14,11 @@ import struct
 logger = logging.getLogger("mtgroup.ebpf.loader")
 
 try:
-    from bcc import BPF  # type: ignore
+    # Imported for availability detection only — this module never calls
+    # BPF() directly, it just needs to know whether BCC is installed.
+    # noqa F401: the import IS the feature test; removing it breaks
+    # graceful degradation to simulation mode.
+    from bcc import BPF  # type: ignore # noqa: F401
     HAS_BCC = True
 except ImportError:
     HAS_BCC = False

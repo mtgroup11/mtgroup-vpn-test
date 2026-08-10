@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import logging
 import asyncio
@@ -132,19 +132,19 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 # needs a db_session_factory that only exists once the lifespan has run,
 # and orchestrator.is_app_banned() (checked in stealth_middleware below)
 # already covers the same app-level ban set without that ordering problem.
-from backend.app.api.rate_limiter import RateLimitMiddleware, SecurityHeadersMiddleware
+from backend.app.api.rate_limiter import RateLimitMiddleware, SecurityHeadersMiddleware  # noqa: E402
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
 # Register API Routers
-from backend.app.api.auth import router as auth_router
-from backend.app.api.users import router as users_router
-from backend.app.api.nodes import router as nodes_router
-from backend.app.api.subscriptions import router as subscriptions_router
-from backend.app.api.system import router as system_router
-from backend.app.api.metrics import router as metrics_router
-from backend.app.api.resellers import router as resellers_router
+from backend.app.api.auth import router as auth_router  # noqa: E402
+from backend.app.api.users import router as users_router  # noqa: E402
+from backend.app.api.nodes import router as nodes_router  # noqa: E402
+from backend.app.api.subscriptions import router as subscriptions_router  # noqa: E402
+from backend.app.api.system import router as system_router  # noqa: E402
+from backend.app.api.metrics import router as metrics_router  # noqa: E402
+from backend.app.api.resellers import router as resellers_router  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(users_router)

@@ -2,7 +2,6 @@ import ipaddress
 import logging
 import asyncio
 import shlex
-import subprocess
 from typing import List
 
 from backend.app.core.privileged_helper import PrivilegedHelperError, helper_request

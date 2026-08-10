@@ -3,7 +3,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 from ..utils.api_client import api
-from ..utils.keyboards import get_reseller_menu, get_main_menu
+from ..utils.keyboards import get_reseller_menu
 
 ADD_CUST_USERNAME = 1
 ADD_CUST_PASSWORD = 2
