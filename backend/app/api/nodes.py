@@ -322,9 +322,11 @@ async def _ovh_provision_ip(node: Node) -> str:
     url = "https://api.ovh.com/1.0/ip"
     body = ""
 
-    # Build signature
+    # Build signature. SHA1 here is mandated by the OVH API's own "$1$"
+    # signature scheme, not a security choice we control — usedforsecurity=False
+    # documents that and stops it being flagged as weak-hash-for-security.
     pre_hash = f"{settings.OVH_APP_SECRET}+{settings.OVH_CONSUMER_KEY}+{method}+{url}+{body}+{timestamp}"
-    signature = "$1$" + hashlib.sha1(pre_hash.encode("utf-8")).hexdigest()
+    signature = "$1$" + hashlib.sha1(pre_hash.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(

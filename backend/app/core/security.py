@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,42 @@ def verify_signature(payload: bytes, signature: str, key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Bounded in-memory maps
+# ---------------------------------------------------------------------------
+#
+# All three trackers below are keyed by attacker-influenceable input (a
+# client IP, or an IP+username pair). Without a cap, an attacker who sends
+# requests from many distinct source IPs (real botnet, or spoofed
+# X-Forwarded-For if a proxy trust boundary is ever misconfigured) grows
+# these dicts forever — every one of them ships a `cleanup()` method, but
+# nothing ever calls it, so in practice they are already unbounded today.
+#
+# `_evict_oldest_if_over_capacity` is checked on every write, not on a
+# timer, since there is no background scheduler wired to these trackers —
+# that is the only way to guarantee the bound holds under a sustained
+# flood between now and whenever a periodic cleanup task might exist.
+# This mirrors the *intent* (a hard ceiling + reclaim-oldest-first) of the
+# bounded login-attempt map pattern used by other panels, reimplemented
+# here for mtgroup's own dict-of-timestamps / dict-of-buckets shapes —
+# not copied code.
+
+def _evict_oldest_if_over_capacity(
+    store: dict[str, Any],
+    max_entries: int,
+    last_activity: "Any",
+) -> int:
+    """Evict least-recently-active entries from `store` until it fits
+    within `max_entries`. `last_activity(value)` returns the timestamp to
+    rank by. Returns the number of entries evicted."""
+    evicted = 0
+    while len(store) > max_entries:
+        oldest_key = min(store, key=lambda k: last_activity(store[k]))
+        del store[oldest_key]
+        evicted += 1
+    return evicted
+
+
+# ---------------------------------------------------------------------------
 # In-Memory Rate Limiter (Token Bucket per IP)
 # ---------------------------------------------------------------------------
 
@@ -154,20 +191,42 @@ class TokenBucketRateLimiter:
     """
     Per-IP token bucket rate limiter.
     Each IP gets `max_tokens` tokens that refill at `refill_rate` tokens/second.
+
+    `max_entries` bounds total memory use regardless of how many distinct
+    IPs have ever made a request — see the module-level note above.
+
+    Thread safety: a `threading.Lock` guards every read-modify-write of
+    `_buckets`. This class is called from plain synchronous code (no
+    `await` inside), so within a single asyncio worker there is never
+    concurrent *coroutine* interleaving — but it can still be reached from
+    more than one OS thread (e.g. a background watchdog thread alongside
+    request-handling coroutines), and `dict` mutation from multiple
+    threads without a lock is not safe: concurrent inserts/deletes during
+    `min(store, ...)` iteration can raise `RuntimeError: dictionary keys
+    changed during iteration`. A concurrency stress test
+    (`backend/tests/test_security_bounds.py`) caught exactly this before
+    the lock was added.
     """
 
     def __init__(
         self,
         max_tokens: int = 60,
         refill_rate: float = 1.0,
+        max_entries: int = 50_000,
     ):
         self.max_tokens = max_tokens
         self.refill_rate = refill_rate
+        self.max_entries = max_entries
         self._buckets: dict[str, dict[str, float]] = {}
+        self._lock = threading.Lock()
 
-    def _get_bucket(self, key: str) -> dict[str, float]:
+    def _get_bucket_locked(self, key: str) -> dict[str, float]:
+        """Caller must hold `self._lock`."""
         now = time.monotonic()
         if key not in self._buckets:
+            _evict_oldest_if_over_capacity(
+                self._buckets, self.max_entries - 1, lambda v: v["last"]
+            )
             self._buckets[key] = {"tokens": float(self.max_tokens), "last": now}
         bucket = self._buckets[key]
         elapsed = now - bucket["last"]
@@ -180,30 +239,34 @@ class TokenBucketRateLimiter:
 
     def is_allowed(self, key: str, cost: float = 1.0) -> bool:
         """Check if a request from `key` is allowed and consume a token."""
-        bucket = self._get_bucket(key)
-        if bucket["tokens"] >= cost:
-            bucket["tokens"] -= cost
-            return True
-        return False
+        with self._lock:
+            bucket = self._get_bucket_locked(key)
+            if bucket["tokens"] >= cost:
+                bucket["tokens"] -= cost
+                return True
+            return False
 
     def remaining(self, key: str) -> float:
         """Return the number of remaining tokens for `key`."""
-        return self._get_bucket(key)["tokens"]
+        with self._lock:
+            return self._get_bucket_locked(key)["tokens"]
 
     def reset(self, key: str) -> None:
         """Reset the bucket for a specific key."""
-        self._buckets.pop(key, None)
+        with self._lock:
+            self._buckets.pop(key, None)
 
     def cleanup(self, max_age_seconds: float = 3600.0) -> int:
         """Remove stale bucket entries. Returns number of entries removed."""
-        now = time.monotonic()
-        stale_keys = [
-            k for k, v in self._buckets.items()
-            if now - v["last"] > max_age_seconds
-        ]
-        for k in stale_keys:
-            del self._buckets[k]
-        return len(stale_keys)
+        with self._lock:
+            now = time.monotonic()
+            stale_keys = [
+                k for k, v in self._buckets.items()
+                if now - v["last"] > max_age_seconds
+            ]
+            for k in stale_keys:
+                del self._buckets[k]
+            return len(stale_keys)
 
 
 # ---------------------------------------------------------------------------
@@ -214,37 +277,52 @@ class LoginAttemptTracker:
     """
     Tracks failed login attempts per IP.
     After `max_attempts` failures within `window_seconds`, the IP is flagged.
+
+    `max_entries` bounds total memory use — see the module-level note above
+    `_evict_oldest_if_over_capacity`.
     """
 
     def __init__(
         self,
         max_attempts: int = 5,
         window_seconds: int = 300,
+        max_entries: int = 10_000,
     ):
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
+        self.max_entries = max_entries
         self._attempts: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def record_failure(self, ip: str) -> bool:
         """
         Record a failed login attempt. Returns True if the IP should be banned.
         """
-        now = time.time()
-        cutoff = now - self.window_seconds
-        self._attempts[ip] = [t for t in self._attempts[ip] if t > cutoff]
-        self._attempts[ip].append(now)
-        return len(self._attempts[ip]) >= self.max_attempts
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            is_new_key = ip not in self._attempts
+            self._attempts[ip] = [t for t in self._attempts[ip] if t > cutoff]
+            self._attempts[ip].append(now)
+            if is_new_key:
+                _evict_oldest_if_over_capacity(
+                    self._attempts, self.max_entries,
+                    lambda times: times[-1] if times else 0.0,
+                )
+            return len(self._attempts[ip]) >= self.max_attempts
 
     def record_success(self, ip: str) -> None:
         """Clear failed attempts for an IP after successful login."""
-        self._attempts.pop(ip, None)
+        with self._lock:
+            self._attempts.pop(ip, None)
 
     def get_attempts(self, ip: str) -> int:
         """Get current number of failed attempts for an IP."""
-        now = time.time()
-        cutoff = now - self.window_seconds
-        self._attempts[ip] = [t for t in self._attempts[ip] if t > cutoff]
-        return len(self._attempts[ip])
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            self._attempts[ip] = [t for t in self._attempts[ip] if t > cutoff]
+            return len(self._attempts[ip])
 
     def is_blocked(self, ip: str) -> bool:
         """Check if an IP has exceeded the attempt threshold."""
@@ -252,15 +330,16 @@ class LoginAttemptTracker:
 
     def cleanup(self) -> int:
         """Remove stale entries."""
-        now = time.time()
-        cutoff = now - self.window_seconds
-        stale = [
-            ip for ip, times in self._attempts.items()
-            if all(t <= cutoff for t in times)
-        ]
-        for ip in stale:
-            del self._attempts[ip]
-        return len(stale)
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            stale = [
+                ip for ip, times in self._attempts.items()
+                if all(t <= cutoff for t in times)
+            ]
+            for ip in stale:
+                del self._attempts[ip]
+            return len(stale)
 
 
 # ---------------------------------------------------------------------------
@@ -271,41 +350,56 @@ class HandshakeTracker:
     """
     Tracks anomalous network handshakes per IP.
     After `max_anomalies` within `window_seconds`, the IP is flagged for kernel ban.
+
+    `max_entries` bounds total memory use — see the module-level note above
+    `_evict_oldest_if_over_capacity`.
     """
 
     def __init__(
         self,
         max_anomalies: int = 3,
         window_seconds: int = 300,
+        max_entries: int = 10_000,
     ):
         self.max_anomalies = max_anomalies
         self.window_seconds = window_seconds
+        self.max_entries = max_entries
         self._anomalies: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def record_anomaly(self, ip: str) -> bool:
         """Record an anomalous handshake. Returns True if IP should be banned."""
-        now = time.time()
-        cutoff = now - self.window_seconds
-        self._anomalies[ip] = [t for t in self._anomalies[ip] if t > cutoff]
-        self._anomalies[ip].append(now)
-        return len(self._anomalies[ip]) >= self.max_anomalies
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            is_new_key = ip not in self._anomalies
+            self._anomalies[ip] = [t for t in self._anomalies[ip] if t > cutoff]
+            self._anomalies[ip].append(now)
+            if is_new_key:
+                _evict_oldest_if_over_capacity(
+                    self._anomalies, self.max_entries,
+                    lambda times: times[-1] if times else 0.0,
+                )
+            return len(self._anomalies[ip]) >= self.max_anomalies
 
     def get_count(self, ip: str) -> int:
-        now = time.time()
-        cutoff = now - self.window_seconds
-        self._anomalies[ip] = [t for t in self._anomalies[ip] if t > cutoff]
-        return len(self._anomalies[ip])
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            self._anomalies[ip] = [t for t in self._anomalies[ip] if t > cutoff]
+            return len(self._anomalies[ip])
 
     def cleanup(self) -> int:
-        now = time.time()
-        cutoff = now - self.window_seconds
-        stale = [
-            ip for ip, times in self._anomalies.items()
-            if all(t <= cutoff for t in times)
-        ]
-        for ip in stale:
-            del self._anomalies[ip]
-        return len(stale)
+        with self._lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            stale = [
+                ip for ip, times in self._anomalies.items()
+                if all(t <= cutoff for t in times)
+            ]
+            for ip in stale:
+                del self._anomalies[ip]
+            return len(stale)
 
 
 # ---------------------------------------------------------------------------

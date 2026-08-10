@@ -229,7 +229,10 @@ def parse_client_hello(data: bytes) -> TLSClientHelloInfo:
         client_version, cipher_suites, extension_ids,
     )
     import hashlib
-    ja3_hash = hashlib.md5(ja3_string.encode("ascii")).hexdigest()
+    # JA3 fingerprints are defined as the MD5 of the TLS ClientHello
+    # parameter string — this is an identification hash mandated by the
+    # JA3 spec, not a security-sensitive use of MD5.
+    ja3_hash = hashlib.md5(ja3_string.encode("ascii"), usedforsecurity=False).hexdigest()
 
     return TLSClientHelloInfo(
         sni=sni,
