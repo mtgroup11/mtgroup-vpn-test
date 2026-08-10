@@ -456,9 +456,28 @@ class SystemConfigResponse(BaseModel):
 # Banned IP
 # ---------------------------------------------------------------------------
 
+class BanReason(str, Enum):
+    """Mirrors backend.app.models.BanReason. Kept as a separate schema-layer
+    enum (same convention as UserRole/NodeProtocol above) rather than
+    importing the ORM enum directly.
+
+    Typing `BannedIPCreate.reason` as a plain `str` let any arbitrary
+    value reach the DB unvalidated — SQLAlchemy's Enum column then
+    raised an unhandled LookupError (500) for anything that wasn't an
+    exact match, instead of FastAPI/Pydantic rejecting it with a clean
+    422 at the request boundary."""
+    FAILED_LOGIN = "failed_login"
+    ANOMALOUS_HANDSHAKE = "anomalous_handshake"
+    ACTIVE_PROBE = "active_probe"
+    MANUAL = "manual"
+    RATE_LIMIT = "rate_limit"
+    CONCURRENT_ABUSE = "concurrent_abuse"
+    TRAFFIC_ANOMALY = "traffic_anomaly"
+
+
 class BannedIPCreate(BaseModel):
     ip_address: str
-    reason: str = "manual"
+    reason: BanReason = BanReason.MANUAL
     details: Optional[str] = None
     duration_hours: int = Field(default=24, ge=1, le=8760)
 

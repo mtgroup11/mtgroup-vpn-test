@@ -14,7 +14,7 @@ import psutil
 from backend.app.ebpf.loader import XDPLoader
 
 logger = logging.getLogger("mtgroup.api.metrics")
-router = APIRouter(prefix="/metrics", tags=["metrics"])
+router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 # Global XDP Loader instance for stats
 xdp_loader = XDPLoader(interface="eth0")
@@ -108,7 +108,7 @@ manager = ConnectionManager()
 @router.websocket("/live")
 async def websocket_live_metrics(websocket: WebSocket):
     """
-    WebSocket Endpoint: /api/v1/metrics/live
+    WebSocket Endpoint: /api/metrics/live
     Connect to this endpoint to receive real-time JSON metrics for the Radar UI.
     """
     await manager.connect(websocket)
@@ -223,7 +223,7 @@ async def trigger_autonomous_shield(risk_score: int):
 @router.get("/dashboard")
 async def get_metrics_dashboard():
     """
-    Endpoint: /api/v1/metrics/dashboard
+    Endpoint: /api/metrics/dashboard
     Returns durational awareness data for the Next.js frontend, 
     driven by real system telemetry and eBPF kernel maps.
     """

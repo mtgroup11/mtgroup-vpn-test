@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.auth import get_current_user, get_db
 from backend.app.models import Agent, User, UserRole
 
-router = APIRouter(prefix="/resellers", tags=["resellers"])
+router = APIRouter(prefix="/api/resellers", tags=["resellers"])
 
 
 class SubAgentCreate(BaseModel):

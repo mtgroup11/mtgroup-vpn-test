@@ -358,21 +358,28 @@ async def regenerate_subscription(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Deactivate old subscriptions
+    # Deactivate old subscriptions. `old_subs.scalars()` can only be
+    # consumed once — capture the protocols we want to carry forward
+    # *before* iterating to deactivate, instead of calling `.scalars()`
+    # again afterwards (which returned an already-exhausted result and
+    # raised AttributeError on `.first().protocols` for any user that
+    # actually had an existing subscription — the common case).
     old_subs = await db.execute(
         select(Subscription).where(
             Subscription.user_id == user.id,
             Subscription.is_active,
         )
     )
-    for sub in old_subs.scalars().all():
+    old_sub_rows = old_subs.scalars().all()
+    carried_protocols = old_sub_rows[0].protocols if old_sub_rows else json.dumps(settings.default_protocol_list)
+    for sub in old_sub_rows:
         sub.is_active = False
 
     # Create new subscription
     new_sub = Subscription(
         user_id=user.id,
         token=generate_subscription_token(),
-        protocols=old_subs.scalars().first().protocols if old_subs else json.dumps(settings.default_protocol_list),
+        protocols=carried_protocols,
     )
     db.add(new_sub)
     await db.commit()

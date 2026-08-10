@@ -65,16 +65,16 @@ jobs:
         # measured but not currently included in the gate threshold — its
         # test suite has a pre-existing relative-import failure unrelated
         # to this gate that needs fixing separately.
-        # 55% is a safety margin below the real, currently-achieved ~59.4%
-        # as of 2026-08-10 (routing_engine.py, watchdog.py, telegram_bot.py
-        # went from 0% to meaningfully covered this pass); raise this
-        # number as coverage improves further, never lower it.
+        # 58% is a safety margin below the real, currently-achieved ~61.1%
+        # as of 2026-08-10 — past the original 60% target, on real
+        # production-code-only measurement. Raise this number as coverage
+        # improves further, never lower it.
         run: |
           pytest backend/tests/ \
             --asyncio-mode=auto \
             --cov=backend \
             --cov-report=term-missing \
-            --cov-fail-under=55
+            --cov-fail-under=58
 
   security-scan:
     runs-on: ubuntu-latest
