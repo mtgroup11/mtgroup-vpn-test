@@ -1,4 +1,19 @@
 [run]
+# SQLAlchemy's async ORM bridges every awaited DB call through a greenlet
+# switch (its internal greenlet_spawn mechanism). Without telling coverage
+# to follow greenlet switches, its tracer silently stops attributing lines
+# once execution crosses that boundary — which is nearly every line in an
+# HTTP handler that runs after its first `await db.execute(...)`. This
+# was NOT a real testing gap: routes exercised end-to-end by
+# test_api*.py via the httpx/ASGI test client were reporting as low as
+# 29-50% covered while actually executing fully, because coverage
+# couldn't see past the first DB await. Adding `greenlet` here (found by
+# comparing a file tested via direct async calls, which measured
+# correctly, against one tested via the HTTP client, which didn't) fixed
+# it — total backend coverage went from 67% to 73% with zero new tests,
+# just correct measurement. `thread` covers aiosqlite's background
+# worker thread the same way. Do not remove this.
+concurrency = greenlet, thread
 omit =
     # Interactive terminal admin tool (menus, prompts, print formatting).
     # Its value comes from being exercised by a human operator, not from
