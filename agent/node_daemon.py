@@ -10,12 +10,23 @@ Reports health metrics over ``GET /api/v1/health``.
 Command protocol (``action`` lives inside ``payload``; absent means
 ``sync``)::
 
-    sync         payload IS the complete proxy config → written wholesale
+    sync         payload IS the complete config → written wholesale.
+                 Xray/Sing-box: payload is the config JSON.
+                 AmneziaWG:     payload["config"] is the rendered .conf text.
     drop_user    {"action": "drop_user",   "user_uuid": "<id|email|name>"}
     update_port  {"action": "update_port", "new_port": 8443}
+    add_peer     {"action": "add_peer",    "public_key": "...",
+                  "allowed_ips": "10.8.0.7/32", "preshared_key": "..."}
+    remove_peer  {"action": "remove_peer", "public_key": "..."}
 
-``drop_user`` and ``update_port`` are *surgical*: they load the existing
-config, mutate it, and write it back. They never replace it.
+Everything except ``sync`` is *surgical*: it loads the existing config,
+mutates it, and writes it back. It never replaces it.
+
+``add_peer``/``remove_peer`` are AmneziaWG-only and are applied to the
+running interface with ``awg set`` rather than by restarting the service —
+a restart tears down every established tunnel, so adding one user would
+disconnect everyone else on the node. The config file is written either
+way, so a failed live update still takes effect on the next restart.
 
 Anything with an unrecognised ``action``, and any ``sync`` whose payload
 doesn't structurally look like a proxy config, is rejected with 400 and
@@ -69,15 +80,181 @@ def verify_signature(api_key: str, signature: str, body_bytes: bytes) -> bool:
     return hmac.compare_digest(expected_mac, signature)
 
 
+# AmneziaWG interface name and its on-disk config. `awg-quick@awg0` is the
+# systemd unit template AmneziaWG ships, mirroring wg-quick@.
+AWG_INTERFACE = os.environ.get("MTGROUP_AWG_INTERFACE", "awg0")
+AWG_CONFIG_PATH = f"/etc/amnezia/amneziawg/{AWG_INTERFACE}.conf"
+
+
+def is_amnezia(config_type: str) -> bool:
+    lowered = (config_type or "").lower()
+    return "amnezia" in lowered or lowered in {"awg", "wg", "wireguard"}
+
+
 def resolve_target(config_type: str) -> tuple[str, str]:
     """Map a config_type label to its on-disk config path and systemd unit."""
     lowered = (config_type or "").lower()
+    if is_amnezia(lowered):
+        return AWG_CONFIG_PATH, f"awg-quick@{AWG_INTERFACE}"
     if "singbox" in lowered or "sing-box" in lowered:
         return "/etc/sing-box/config.json", "sing-box"
     if "xray" in lowered or "vless" in lowered or "trojan" in lowered:
         return "/usr/local/etc/xray/config.json", "xray"
     logger.warning("Unknown config_type %r — defaulting to xray.", config_type)
     return "/usr/local/etc/xray/config.json", "xray"
+
+
+# ── AmneziaWG / WireGuard config editing ──────────────────────────────
+#
+# wg configs are INI-shaped but `configparser` can't be used: a real config
+# has *repeated* [Peer] sections, which configparser collapses. They're also
+# whitespace/comment sensitive in ways operators care about, and the
+# [Interface] block carries the Amnezia obfuscation parameters (Jc/Jmin/H1…)
+# that must survive untouched — losing them silently turns the tunnel back
+# into plain detectable WireGuard.
+
+def parse_wg_config(text: str) -> tuple[list[str], list[list[str]]]:
+    """
+    Split a wg config into (interface_lines, peer_blocks).
+
+    Everything before the first [Peer] is the interface part and is
+    preserved verbatim, comments and all.
+    """
+    interface: list[str] = []
+    peers: list[list[str]] = []
+    current: list[str] | None = None
+
+    for line in text.splitlines():
+        if line.strip().lower().startswith("[peer]"):
+            current = [line]
+            peers.append(current)
+        elif current is None:
+            interface.append(line)
+        else:
+            current.append(line)
+
+    return interface, peers
+
+
+def render_wg_config(interface: list[str], peers: list[list[str]]) -> str:
+    parts: list[str] = []
+    body = "\n".join(interface).rstrip()
+    if body:
+        parts.append(body)
+    for peer in peers:
+        block = "\n".join(peer).rstrip()
+        if block:
+            parts.append(block)
+    return "\n\n".join(parts) + "\n"
+
+
+def peer_public_key(block: list[str]) -> str | None:
+    for line in block:
+        stripped = line.strip()
+        if stripped.lower().startswith("publickey"):
+            _, _, value = stripped.partition("=")
+            return value.strip()
+    return None
+
+
+def build_peer_block(public_key: str, allowed_ips: str, preshared_key: str | None = None) -> list[str]:
+    block = ["[Peer]", f"PublicKey = {public_key}"]
+    if preshared_key:
+        block.append(f"PresharedKey = {preshared_key}")
+    block.append(f"AllowedIPs = {allowed_ips}")
+    return block
+
+
+def upsert_peer(
+    peers: list[list[str]],
+    public_key: str,
+    allowed_ips: str,
+    preshared_key: str | None = None,
+) -> tuple[list[list[str]], bool]:
+    """Add or replace a peer. Returns (peers, changed)."""
+    new_block = build_peer_block(public_key, allowed_ips, preshared_key)
+    for index, block in enumerate(peers):
+        if peer_public_key(block) == public_key:
+            if block == new_block:
+                return peers, False  # already exactly right — don't churn
+            peers[index] = new_block
+            return peers, True
+    peers.append(new_block)
+    return peers, True
+
+
+def remove_peer_block(peers: list[list[str]], public_key: str) -> tuple[list[list[str]], int]:
+    """Drop every peer with this public key. Returns (peers, removed_count)."""
+    kept = [b for b in peers if peer_public_key(b) != public_key]
+    return kept, len(peers) - len(kept)
+
+
+def read_text_config(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.error("Could not read %s: %s", path, exc)
+        return ""
+
+
+def atomic_write_text(path: str, text: str) -> None:
+    """Atomic counterpart to atomic_write_config for non-JSON configs."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".mtgroup-awg-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)  # contains the server private key
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+async def apply_peer_live(public_key: str, allowed_ips: str | None, remove: bool = False) -> bool:
+    """
+    Apply a peer change to the *running* interface with `awg set`.
+
+    Deliberately avoids restarting the service for peer changes: a restart
+    tears down every existing tunnel, so adding one user would disconnect
+    everyone else on the node. `awg set` applies live with no disruption.
+
+    Returns True if the live update succeeded. A False here is not fatal —
+    the config file has already been written, so the change takes effect on
+    the next interface restart; the caller just reports it.
+    """
+    args = ["awg", "set", AWG_INTERFACE, "peer", public_key]
+    if remove:
+        args.append("remove")
+    elif allowed_ips:
+        args += ["allowed-ips", allowed_ips]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return True
+        logger.warning(
+            "Live peer update failed (%s): %s — change persisted to %s and "
+            "will apply on next interface restart.",
+            " ".join(args), stderr.decode(errors="replace").strip(), AWG_CONFIG_PATH,
+        )
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning(
+            "Could not run `awg set` (%s) — change persisted to %s and will "
+            "apply on next interface restart.", exc, AWG_CONFIG_PATH,
+        )
+    return False
 
 
 def looks_like_full_config(payload: object) -> bool:
@@ -249,6 +426,27 @@ async def sync_handler(request: web.Request) -> web.Response:
         action = data.get("action") or payload.get("action") or "sync"
 
         if action == "sync":
+            if is_amnezia(config_type):
+                # AmneziaWG configs are INI text, not JSON — a full sync
+                # carries the rendered file in `payload["config"]`. Writing a
+                # JSON blob here would leave awg-quick unable to parse its own
+                # config and the interface down.
+                rendered = payload.get("config")
+                if not isinstance(rendered, str) or "[Interface]" not in rendered:
+                    logger.error(
+                        "Refusing AmneziaWG sync: payload.config must be the "
+                        "rendered .conf text containing an [Interface] section. "
+                        "Node config left untouched.",
+                    )
+                    return web.json_response(
+                        {"error": "amnezia sync requires payload.config as rendered .conf text"},
+                        status=400,
+                    )
+                atomic_write_text(target_file, rendered)
+                logger.info("Wrote full AmneziaWG config to %s", target_file)
+                asyncio.create_task(restart_service(service))
+                return web.json_response({"status": "synced"})
+
             if not looks_like_full_config(payload):
                 # Refuse rather than clobber a working config with a blob
                 # that isn't one. Returning 400 makes the master's retry
@@ -312,6 +510,57 @@ async def sync_handler(request: web.Request) -> web.Response:
             logger.info("update_port: repointed %d inbound(s) to %d in %s", changed, new_port, target_file)
             asyncio.create_task(restart_service(service))
             return web.json_response({"status": "applied", "action": action, "changed": changed})
+
+        if action in ("add_peer", "remove_peer"):
+            if not is_amnezia(config_type):
+                return web.json_response(
+                    {"error": f"{action} is only valid for amnezia_wg nodes, got {config_type!r}"},
+                    status=400,
+                )
+
+            # Validate the request fully before looking at node state, so a
+            # malformed command is rejected the same way regardless of
+            # whether the interface happens to be provisioned yet.
+            public_key = str(payload.get("public_key") or "")
+            if not public_key:
+                return web.json_response({"error": f"{action} requires public_key"}, status=400)
+
+            allowed_ips = str(payload.get("allowed_ips") or "")
+            if action == "add_peer" and not allowed_ips:
+                return web.json_response({"error": "add_peer requires allowed_ips"}, status=400)
+
+            existing = read_text_config(target_file)
+            if not existing.strip():
+                logger.warning(
+                    "%s: no AmneziaWG config at %s — the interface has not been "
+                    "provisioned on this node.", action, target_file,
+                )
+                return web.json_response(
+                    {"status": "noop", "reason": "no amneziawg config on disk"},
+                )
+
+            interface, peers = parse_wg_config(existing)
+
+            if action == "add_peer":
+                peers, changed = upsert_peer(
+                    peers, public_key, allowed_ips, payload.get("preshared_key"),
+                )
+                if not changed:
+                    return web.json_response({"status": "noop", "reason": "peer already present"})
+                atomic_write_text(target_file, render_wg_config(interface, peers))
+                live = await apply_peer_live(public_key, allowed_ips)
+                logger.info("add_peer: %s -> %s (live=%s)", public_key[:16], allowed_ips, live)
+                return web.json_response({"status": "applied", "action": action, "live": live})
+
+            peers, removed = remove_peer_block(peers, public_key)
+            if removed == 0:
+                return web.json_response({"status": "noop", "removed": 0})
+            atomic_write_text(target_file, render_wg_config(interface, peers))
+            live = await apply_peer_live(public_key, None, remove=True)
+            logger.info("remove_peer: %s (removed=%d, live=%s)", public_key[:16], removed, live)
+            return web.json_response(
+                {"status": "applied", "action": action, "removed": removed, "live": live}
+            )
 
         # Unknown action: never fall through to writing the config.
         logger.error("Rejecting unknown action %r — node config left untouched.", action)
