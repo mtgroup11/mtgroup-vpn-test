@@ -273,6 +273,48 @@ class TestProcessAccounting:
 
         assert engine._traffic_buffer == {42: 777}
 
+    @pytest.mark.asyncio
+    async def test_retry_buffer_is_bounded_during_a_sustained_db_outage(self, acct_engine, monkeypatch):
+        # Without a cap, every failed cycle re-adds its deltas and the dict
+        # grows for as long as the outage lasts — in a worker designed to run
+        # forever. Verify the bound actually holds rather than just trusting
+        # the constant exists.
+        engine, _factory = acct_engine
+        monkeypatch.setattr(type(engine), "MAX_BUFFER_ENTRIES", 100)
+
+        class _BoomFactory:
+            def __call__(self):
+                raise RuntimeError("db unavailable")
+
+        engine._db_session_factory = _BoomFactory()
+
+        for user_id in range(500):
+            await engine.ingest_traffic(user_id=user_id, bytes_delta=10)
+        await engine._process_accounting()
+
+        assert len(engine._traffic_buffer) == 100
+        # Oldest dropped, most recent traffic kept.
+        assert 499 in engine._traffic_buffer
+        assert 0 not in engine._traffic_buffer
+
+    @pytest.mark.asyncio
+    async def test_retry_buffer_under_the_cap_is_untouched(self, acct_engine, monkeypatch):
+        engine, _factory = acct_engine
+        monkeypatch.setattr(type(engine), "MAX_BUFFER_ENTRIES", 100)
+
+        class _BoomFactory:
+            def __call__(self):
+                raise RuntimeError("db unavailable")
+
+        engine._db_session_factory = _BoomFactory()
+
+        for user_id in range(10):
+            await engine.ingest_traffic(user_id=user_id, bytes_delta=10)
+        await engine._process_accounting()
+
+        assert len(engine._traffic_buffer) == 10
+        assert engine._traffic_buffer[0] == 10  # nothing evicted, nothing lost
+
 
 class TestDropUserFromNodes:
     @pytest.mark.asyncio

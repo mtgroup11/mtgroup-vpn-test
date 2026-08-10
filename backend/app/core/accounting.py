@@ -23,6 +23,14 @@ class TrafficAccountingEngine:
     Fetches real-time bandwidth usage and manages quota limits.
     """
 
+    # Bounds the retry buffer. If the DB is unreachable, `_process_accounting`
+    # pushes the un-committed deltas back into `_traffic_buffer` so they aren't
+    # lost — but with no cap that grows without limit for as long as the
+    # outage lasts, in a worker that is meant to run forever. Same failure
+    # mode the rate/login/handshake trackers were bounded for in
+    # `core/security.py`; this buffer was missed at the time.
+    MAX_BUFFER_ENTRIES: int = 50_000
+
     def __init__(self, db_session_factory: Callable[[], AsyncSession]):
         self._db_session_factory = db_session_factory
         self._is_running = False
@@ -149,10 +157,27 @@ class TrafficAccountingEngine:
 
         except Exception as e:
             logger.error(f"Error in traffic accounting cycle: {e}")
-            # Optional: push current_buffer back to self._traffic_buffer on failure
+            # Push the un-committed deltas back so a transient DB failure
+            # doesn't silently lose billable traffic — but bounded, so a
+            # sustained outage can't grow this dict without limit.
             async with self._buffer_lock:
                 for uid, delta in current_buffer.items():
                     self._traffic_buffer[uid] = self._traffic_buffer.get(uid, 0) + delta
+
+                overflow = len(self._traffic_buffer) - self.MAX_BUFFER_ENTRIES
+                if overflow > 0:
+                    # Drop the oldest entries (dicts preserve insertion order),
+                    # keeping the most recent traffic. Losing some accounting
+                    # data is the lesser evil versus unbounded growth in a
+                    # long-running worker.
+                    for uid in list(self._traffic_buffer)[:overflow]:
+                        del self._traffic_buffer[uid]
+                    logger.error(
+                        "Traffic accounting retry buffer exceeded %d entries — "
+                        "dropped %d oldest users' pending deltas. Traffic for "
+                        "those users is under-counted for this window.",
+                        self.MAX_BUFFER_ENTRIES, overflow,
+                    )
 
     async def _drop_user_from_nodes(self, user: User):
         """
