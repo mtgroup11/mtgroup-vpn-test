@@ -85,9 +85,22 @@ class TrafficAccountingEngine:
                     )
                 )
                 params = [{"b_id": uid, "b_delta": delta} for uid, delta in current_buffer.items()]
-                
+
                 if params:
-                    await session.execute(stmt, params)
+                    # Executed via the underlying Core connection rather
+                    # than session.execute(): going through the ORM
+                    # Session here triggers SQLAlchemy's "ORM Bulk UPDATE
+                    # by Primary Key" auto-detection (WHERE pk ==
+                    # bindparam(), executed with a list of param dicts),
+                    # which then demands the param dict key match the
+                    # mapped column name ("b_id" vs "id") and separately
+                    # refuses to run without opting out of ORM-session
+                    # sync. Both failure modes were silently swallowed by
+                    # the except-block below, meaning traffic accounting
+                    # and quota suspension never actually executed. A
+                    # plain Core executemany has neither problem.
+                    conn = await session.connection()
+                    await conn.execute(stmt, params)
 
                 # 2. Check for suspended users (who exceeded quota)
                 user_ids = list(current_buffer.keys())

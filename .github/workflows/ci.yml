@@ -65,16 +65,20 @@ jobs:
         # measured but not currently included in the gate threshold — its
         # test suite has a pre-existing relative-import failure unrelated
         # to this gate that needs fixing separately.
-        # 62% is a safety margin below the real, currently-achieved ~65.2%
-        # as of 2026-08-10 (orchestrator.py 28%->84%, ai_detector.py
-        # 23%->94% this pass). Raise this number as coverage improves
-        # further, never lower it.
+        # 65% is a safety margin below the real, currently-achieved ~67%
+        # as of 2026-08-10 (accounting.py 27%->91%, auto_cdn.py 0%->95%
+        # this pass — also fixed a real bug found via testing: the bulk
+        # traffic-accounting UPDATE threw on every single cycle under
+        # SQLAlchemy 2.x and was silently swallowed, so quota
+        # suspension never actually ran in production; see
+        # backend/app/core/accounting.py). Raise this number as coverage
+        # improves further, never lower it.
         run: |
           pytest backend/tests/ \
             --asyncio-mode=auto \
             --cov=backend \
             --cov-report=term-missing \
-            --cov-fail-under=62
+            --cov-fail-under=65
 
   security-scan:
     runs-on: ubuntu-latest

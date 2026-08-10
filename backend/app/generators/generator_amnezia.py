@@ -7,22 +7,30 @@ with the official AmneziaWG client.
 
 from __future__ import annotations
 
-import secrets
 from typing import Optional
 
 
 def _generate_wg_keypair() -> tuple[str, str]:
     """
-    Generate a simulated WireGuard keypair (base64-encoded 32 bytes).
-    In production, use `wg genkey` / `wg pubkey` on the server.
+    Generate a real WireGuard/AmneziaWG keypair: a Curve25519 (X25519)
+    private key and its properly derived public key, base64-encoded as
+    the wg tooling expects (32 raw bytes each, standard base64 with
+    padding).
     """
     import base64
-    private_bytes = secrets.token_bytes(32)
-    private_key = base64.b64encode(private_bytes).decode("ascii")
-    # In production this would be derived via Curve25519; here we generate
-    # a placeholder public key for template completeness
-    public_bytes = secrets.token_bytes(32)
-    public_key = base64.b64encode(public_bytes).decode("ascii")
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import x25519
+
+    priv = x25519.X25519PrivateKey.generate()
+    pub = priv.public_key()
+    priv_bytes = priv.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+    )
+    pub_bytes = pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+    private_key = base64.b64encode(priv_bytes).decode("ascii")
+    public_key = base64.b64encode(pub_bytes).decode("ascii")
     return private_key, public_key
 
 
