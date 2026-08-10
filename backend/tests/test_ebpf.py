@@ -72,7 +72,7 @@ class TestXDPLoader:
         assert ip_str == "192.168.1.1"
 
     def test_ip_conversion_edge_cases(self):
-        for ip in ["0.0.0.0", "255.255.255.255", "127.0.0.1", "10.0.0.1"]:
+        for ip in ["0.0.0.0", "255.255.255.255", "127.0.0.1", "10.0.0.1"]:  # nosec B104 - test data, not a socket bind
             ip_int = XDPLoader._ip_to_int(ip)
             result = XDPLoader._int_to_ip(ip_int)
             assert result == ip

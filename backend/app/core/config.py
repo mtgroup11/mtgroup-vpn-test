@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "MTGroup VPN Ultimate"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
-    HOST: str = "0.0.0.0"
+    HOST: str = "0.0.0.0"  # nosec B104 - VPN panel must accept external client connections
     PORT: int = 8443
     BASE_URL: str = "https://panel.example.com"
     WORKERS: int = 4

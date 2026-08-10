@@ -292,7 +292,7 @@ async def main() -> None:
     except (KeyError, OSError, AttributeError) as exc:
         logger.warning("could not chown socket to group %s: %s", PANEL_GROUP, exc)
     try:
-        os.chmod(SOCKET_PATH, 0o660)
+        os.chmod(SOCKET_PATH, 0o660)  # nosec B103 - rw for root+PANEL_GROUP only (chowned above), no access for others
     except OSError as exc:
         logger.warning("could not chmod socket: %s", exc)
 

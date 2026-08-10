@@ -81,7 +81,7 @@ class NodeOrchestrator:
     def __init__(self, db_session_factory=None):
         self._db_session_factory = db_session_factory
         self._retry_queue: asyncio.Queue[RetryTask] = asyncio.Queue()
-        self._client = httpx.AsyncClient(timeout=10.0, verify=False)  # Node'larda self-signed cert olabilir
+        self._client = httpx.AsyncClient(timeout=10.0, verify=False)  # nosec B501 - nodes use self-signed certs; payload integrity is instead guaranteed by the HMAC-SHA256 signature on every request (see _generate_signature)
         self._worker_task: asyncio.Task | None = None
         self._is_running = False
         self._app_banned_ips: set[str] = set()

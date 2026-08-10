@@ -165,7 +165,10 @@ class MTGroupBot:
 
         ebpf_stats = {"total_dropped": 0, "active_v4": 0, "active_v6": 0}
         try:
-            with open("/tmp/mtgroup_xdp_stats.json", "r") as f:
+            # /run (not /tmp) — root-only-writable on most distros, so a
+            # local unprivileged user can't plant/symlink this file to
+            # feed fake stats into the bot.
+            with open("/run/mtgroup/xdp_stats.json", "r") as f:
                 ebpf_stats = json.load(f)
         except Exception:
             pass

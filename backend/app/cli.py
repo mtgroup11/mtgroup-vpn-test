@@ -77,7 +77,7 @@ class C:
 
 def clear_screen() -> None:
     """Clear the terminal screen cross-platform."""
-    os.system("cls" if os.name == "nt" else "clear")
+    os.system("cls" if os.name == "nt" else "clear")  # nosec B605 - fixed literal command, no user input
 
 
 def get_terminal_width() -> int:
@@ -397,7 +397,10 @@ async def cmd_system_status() -> None:
         ebpf_stats = {"total_dropped": 0, "active_v4": 0, "active_v6": 0}
         try:
             import json
-            with open("/tmp/mtgroup_xdp_stats.json", "r") as f:
+            # /run (not /tmp) — root-only-writable on most distros, so a
+            # local unprivileged user can't plant/symlink this file to
+            # feed fake stats into the admin CLI.
+            with open("/run/mtgroup/xdp_stats.json", "r") as f:
                 ebpf_stats = json.load(f)
         except Exception:
             pass
@@ -1332,7 +1335,10 @@ async def cmd_bans_and_audit() -> None:
     ebpf_stats = {"total_dropped": 0, "active_v4": 0, "active_v6": 0}
     try:
         import json
-        with open("/tmp/mtgroup_xdp_stats.json", "r") as f:
+        # /run (not /tmp) — root-only-writable on most distros, so a
+        # local unprivileged user can't plant/symlink this file to
+        # feed fake stats into the admin CLI.
+        with open("/run/mtgroup/xdp_stats.json", "r") as f:
             ebpf_stats = json.load(f)
     except Exception:
         pass

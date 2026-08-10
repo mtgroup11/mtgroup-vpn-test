@@ -876,7 +876,7 @@ class SNIMultiplexer:
 
     def __init__(
         self,
-        listen_host: str = "0.0.0.0",
+        listen_host: str = "0.0.0.0",  # nosec B104 - SNI multiplexer/decoy proxy must accept public client TLS connections
         listen_port: int = 443,
         decoy_target: Optional[str] = None,
     ) -> None:

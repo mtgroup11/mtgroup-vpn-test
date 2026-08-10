@@ -66,7 +66,7 @@ working. Further configuration is required.</p>
 """
 
 class HoneypotEngine:
-    def __init__(self, host: str = "0.0.0.0", port: int | None = None):
+    def __init__(self, host: str = "0.0.0.0", port: int | None = None):  # nosec B104 - decoy server must be reachable from the public internet to bait probes
         self.host = host
         # Default fallback to 8080 if not defined in config
         # Expecting HONEYPOT_PORT in config, but using PORT or a default for now.
