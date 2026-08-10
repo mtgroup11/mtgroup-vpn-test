@@ -96,18 +96,18 @@ jobs:
           pip install bandit safety
 
       - name: Security scan with bandit
-        # Non-blocking (informational): 10 findings remain as of
-        # 2026-08-10 (down from 12 — this session fixed 2 real false
-        # positives via usedforsecurity=False on the SHA1/MD5 calls used
-        # for OVH signing / JA3 fingerprinting, neither a security use of
-        # the hash). The rest are a mix
-        # of intentional design (0.0.0.0 bind, verify=False on self-signed
-        # node certs) and minor items (hardcoded /tmp paths) not triaged
-        # yet — not flipping to blocking until each is explicitly
-        # accepted or fixed, so this doesn't silently block unrelated PRs.
+        # Blocking as of 2026-08-10: 0 findings remain (down from 10).
+        # Every prior finding was either fixed (the /tmp-hardcoded XDP
+        # stats path moved to /run) or explicitly accepted as intentional
+        # design via an inline `# nosec BXXX - reason` comment (0.0.0.0
+        # binds on public-facing services, verify=False on self-signed
+        # node certs backed by HMAC payload signing, the privileged
+        # helper's restrictive socket chmod, the literal cls/clear shell
+        # call, one test-data false positive). New findings should be
+        # fixed or given the same nosec-with-reason treatment, not
+        # silently reintroduced by flipping this back to non-blocking.
         run: |
           bandit -r backend/ telegram_bot/ -ll --skip B101
-        continue-on-error: true
 
       - name: Check for vulnerable dependencies
         # Non-blocking: `safety check` is deprecated upstream in favour of
