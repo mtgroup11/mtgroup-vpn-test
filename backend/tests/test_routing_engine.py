@@ -1,26 +1,35 @@
 """
 MTGroup VPN Ultimate — SNI Routing Engine Test Suite
 Tests backend/app/core/routing_engine.py's TLS ClientHello parser (pure,
-byte-level — no mocking needed), SNIRouteTable (pure async, no I/O), and
-DecoyReverseProxy (httpx mocked via MockTransport, no real network calls).
+byte-level — no mocking needed), SNIRouteTable (pure async, no I/O),
+DecoyReverseProxy (httpx mocked via MockTransport, no real network calls),
+SNIMultiplexer (asyncio streams faked in-process, no real sockets), and
+the pure DPI-evasion preset generator functions.
 """
 
 from __future__ import annotations
 
 import struct
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
 from backend.app.core.routing_engine import (
+    DecoyResponse,
     DecoyReverseProxy,
     RouteAction,
     RouteEntry,
+    SNIMultiplexer,
     SNIRouteTable,
     TLSParseError,
     _compute_ja3_string,
     _parse_alpn_extension,
     _parse_sni_extension,
+    apply_dpi_evasion_to_outbound,
+    generate_fragment_block,
+    generate_noise_block,
+    get_preset_config,
     parse_client_hello,
 )
 
@@ -375,3 +384,401 @@ class TestDecoyReverseProxy:
         proxy = DecoyReverseProxy()
         stats = proxy.get_stats()
         assert stats["error_rate_pct"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# SNIMultiplexer — fake asyncio streams, no real sockets
+# ---------------------------------------------------------------------------
+
+class _FakeReader:
+    """Minimal asyncio.StreamReader stand-in fed from a list of chunks."""
+
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = list(chunks)
+
+    async def read(self, n: int) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+class _FakeWriter:
+    """Minimal asyncio.StreamWriter stand-in that records what it's sent."""
+
+    def __init__(self, peer: tuple[str, int] | None = ("203.0.113.5", 54321)):
+        self.written = bytearray()
+        self.closed = False
+        self._peer = peer
+
+    def get_extra_info(self, name):
+        return self._peer if name == "peername" else None
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+def _client_hello_bytes(sni: str = "vpn.example.com") -> bytes:
+    return build_client_hello(sni=sni)
+
+
+class TestSNIMultiplexerBackendManagement:
+    @pytest.mark.asyncio
+    async def test_add_backend_registers_route(self):
+        mux = SNIMultiplexer(listen_port=0)
+        await mux.add_backend("vpn.example.com", backend_port=9443, protocol_tag="vless")
+        match = await mux._route_table.lookup("vpn.example.com")
+        assert match.action == RouteAction.PROXY_BACKEND
+        assert match.entry.backend_port == 9443
+
+    @pytest.mark.asyncio
+    async def test_remove_backend_unregisters_route(self):
+        mux = SNIMultiplexer(listen_port=0)
+        await mux.add_backend("vpn.example.com")
+        assert await mux.remove_backend("vpn.example.com") is True
+        match = await mux._route_table.lookup("vpn.example.com")
+        assert match.action == RouteAction.DECOY_REVERSE
+
+    @pytest.mark.asyncio
+    async def test_get_stats_reports_counters_and_nested_stats(self):
+        mux = SNIMultiplexer(listen_port=0)
+        stats = await mux.get_stats()
+        assert stats["total_connections"] == 0
+        assert "routing" in stats
+        assert "decoy" in stats
+
+
+class TestSNIMultiplexerStartStop:
+    @pytest.mark.asyncio
+    async def test_start_creates_server_and_initializes_decoy(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        fake_server = MagicMock()
+        fake_sock = MagicMock()
+        fake_sock.getsockname.return_value = ("0.0.0.0", 443)
+        fake_server.sockets = [fake_sock]
+
+        start_server_mock = AsyncMock(return_value=fake_server)
+        monkeypatch.setattr("backend.app.core.routing_engine.asyncio.start_server", start_server_mock)
+        monkeypatch.setattr(mux._decoy_proxy, "initialize", AsyncMock())
+
+        await mux.start()
+
+        start_server_mock.assert_awaited_once()
+        mux._decoy_proxy.initialize.assert_awaited_once()
+        assert mux._server is fake_server
+
+    @pytest.mark.asyncio
+    async def test_stop_closes_server_and_decoy(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        fake_server = MagicMock()
+        fake_server.close = MagicMock()
+        fake_server.wait_closed = AsyncMock()
+        mux._server = fake_server
+        monkeypatch.setattr(mux._decoy_proxy, "close", AsyncMock())
+
+        await mux.stop()
+
+        fake_server.close.assert_called_once()
+        fake_server.wait_closed.assert_awaited_once()
+        mux._decoy_proxy.close.assert_awaited_once()
+        assert mux._server is None
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_is_a_noop(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        monkeypatch.setattr(mux._decoy_proxy, "close", AsyncMock())
+        await mux.stop()  # must not raise despite _server being None
+        mux._decoy_proxy.close.assert_awaited_once()
+
+
+class TestSNIMultiplexerPipe:
+    @pytest.mark.asyncio
+    async def test_pipe_copies_all_chunks_until_eof(self):
+        reader = _FakeReader([b"hello ", b"world"])
+        writer = _FakeWriter()
+        await SNIMultiplexer._pipe(reader, writer, "test")
+        assert bytes(writer.written) == b"hello world"
+
+    @pytest.mark.asyncio
+    async def test_pipe_swallows_connection_errors(self):
+        class _BoomReader:
+            async def read(self, n):
+                raise ConnectionResetError("peer gone")
+
+        writer = _FakeWriter()
+        await SNIMultiplexer._pipe(_BoomReader(), writer, "test")  # must not raise
+
+
+class TestSNIMultiplexerDeflectAndTarpit:
+    @pytest.mark.asyncio
+    async def test_deflect_to_decoy_writes_http_response(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        fake_response = DecoyResponse(
+            status_code=200,
+            headers={"Content-Type": "text/html"},
+            body=b"<html>decoy</html>",
+            target_url="https://decoy.example.com/",
+        )
+        monkeypatch.setattr(mux._decoy_proxy, "fetch_decoy_response", AsyncMock(return_value=fake_response))
+
+        writer = _FakeWriter()
+        await mux._deflect_to_decoy(writer, "probe-context")
+
+        sent = bytes(writer.written)
+        assert sent.startswith(b"HTTP/1.1 200 OK\r\n")
+        assert b"<html>decoy</html>" in sent
+
+    @pytest.mark.asyncio
+    async def test_deflect_to_decoy_swallows_write_errors(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        fake_response = DecoyResponse(status_code=200, headers={}, body=b"x", target_url="https://d/")
+        monkeypatch.setattr(mux._decoy_proxy, "fetch_decoy_response", AsyncMock(return_value=fake_response))
+
+        writer = _FakeWriter()
+        writer.write = MagicMock(side_effect=BrokenPipeError())
+        await mux._deflect_to_decoy(writer, "ctx")  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_tarpit_drips_bytes_then_closes_with_zero_chunk(self, monkeypatch):
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("backend.app.core.routing_engine.asyncio.sleep", sleep_mock)
+
+        writer = _FakeWriter()
+        await SNIMultiplexer._tarpit_connection(writer, "scanner-ctx")
+
+        assert sleep_mock.await_count == 12
+        assert bytes(writer.written).endswith(b"0\r\n\r\n")
+        assert bytes(writer.written).startswith(b"HTTP/1.1 200 OK\r\n")
+
+    @pytest.mark.asyncio
+    async def test_tarpit_swallows_connection_errors(self, monkeypatch):
+        monkeypatch.setattr("backend.app.core.routing_engine.asyncio.sleep", AsyncMock())
+        writer = _FakeWriter()
+        writer.write = MagicMock(side_effect=ConnectionResetError())
+        await SNIMultiplexer._tarpit_connection(writer, "ctx")  # must not raise
+
+
+class TestSNIMultiplexerForwardToBackend:
+    @pytest.mark.asyncio
+    async def test_forwards_replayed_hello_and_pipes_both_directions(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        entry = RouteEntry(sni_pattern="vpn.example.com", backend_host="127.0.0.1", backend_port=10443)
+
+        backend_reader = _FakeReader([b"backend-reply"])
+        backend_writer = _FakeWriter()
+        open_connection_mock = AsyncMock(return_value=(backend_reader, backend_writer))
+        monkeypatch.setattr("backend.app.core.routing_engine.asyncio.open_connection", open_connection_mock)
+
+        client_reader = _FakeReader([])  # client sends nothing more after the hello
+        client_writer = _FakeWriter()
+
+        await mux._forward_to_backend(client_reader, client_writer, b"HELLO-BYTES", entry, "vpn.example.com")
+
+        # The already-consumed ClientHello bytes must be replayed to the backend first.
+        assert bytes(backend_writer.written).startswith(b"HELLO-BYTES")
+        # And the backend's reply must have been piped back to the client.
+        assert bytes(client_writer.written) == b"backend-reply"
+        assert backend_writer.closed is True
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_falls_back_to_decoy(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        entry = RouteEntry(sni_pattern="vpn.example.com", backend_host="127.0.0.1", backend_port=10443)
+
+        monkeypatch.setattr(
+            "backend.app.core.routing_engine.asyncio.open_connection",
+            AsyncMock(side_effect=OSError("connection refused")),
+        )
+        deflect_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_deflect_to_decoy", deflect_mock)
+
+        client_writer = _FakeWriter()
+        await mux._forward_to_backend(_FakeReader([]), client_writer, b"HELLO", entry, "vpn.example.com")
+
+        deflect_mock.assert_awaited_once()
+
+
+class TestSNIMultiplexerHandleConnection:
+    @pytest.mark.asyncio
+    async def test_empty_connection_returns_early(self):
+        mux = SNIMultiplexer(listen_port=0)
+        reader = _FakeReader([b""])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+        assert mux._active_connections == 0  # incremented then decremented in finally
+
+    @pytest.mark.asyncio
+    async def test_matched_sni_forwards_to_backend(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        await mux.add_backend("vpn.example.com", backend_port=9443)
+        forward_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_forward_to_backend", forward_mock)
+
+        reader = _FakeReader([_client_hello_bytes("vpn.example.com")])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+
+        forward_mock.assert_awaited_once()
+        assert mux._total_backend_forwards == 1
+
+    @pytest.mark.asyncio
+    async def test_unmatched_sni_deflects_to_decoy(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        deflect_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_deflect_to_decoy", deflect_mock)
+
+        reader = _FakeReader([_client_hello_bytes("unknown.example.com")])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+
+        deflect_mock.assert_awaited_once()
+        assert mux._total_decoy_deflections == 1
+
+    @pytest.mark.asyncio
+    async def test_drop_action_increments_drops_without_deflecting(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        await mux._route_table.add_route(RouteEntry(sni_pattern="banned.example.com", action=RouteAction.DROP))
+        deflect_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_deflect_to_decoy", deflect_mock)
+
+        reader = _FakeReader([_client_hello_bytes("banned.example.com")])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+
+        assert mux._total_drops == 1
+        deflect_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tarpit_action_invokes_tarpit(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        await mux._route_table.add_route(RouteEntry(sni_pattern="scanner.example.com", action=RouteAction.TARPIT))
+        tarpit_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_tarpit_connection", tarpit_mock)
+
+        reader = _FakeReader([_client_hello_bytes("scanner.example.com")])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+
+        tarpit_mock.assert_awaited_once()
+        assert mux._total_drops == 1
+
+    @pytest.mark.asyncio
+    async def test_unparseable_data_still_deflects_to_decoy(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        deflect_mock = AsyncMock()
+        monkeypatch.setattr(mux, "_deflect_to_decoy", deflect_mock)
+
+        reader = _FakeReader([b"not a tls client hello at all"])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+
+        assert mux._total_parse_failures == 1
+        deflect_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_increments_parse_failures_and_returns(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+
+        async def _timeout(coro, timeout):
+            coro.close()  # avoid an unawaited-coroutine warning from the real reader.read()
+            raise TimeoutError()
+
+        monkeypatch.setattr("backend.app.core.routing_engine.asyncio.wait_for", _timeout)
+        reader = _FakeReader([])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)
+        assert mux._total_parse_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_unhandled_exception_is_logged_not_raised(self, monkeypatch):
+        mux = SNIMultiplexer(listen_port=0)
+        monkeypatch.setattr(
+            mux._route_table, "lookup", AsyncMock(side_effect=RuntimeError("boom"))
+        )
+        reader = _FakeReader([_client_hello_bytes("vpn.example.com")])
+        writer = _FakeWriter()
+        await mux._handle_connection(reader, writer)  # must not raise
+        assert writer.closed is True
+
+
+# ---------------------------------------------------------------------------
+# DPI Evasion Preset Generator (pure functions)
+# ---------------------------------------------------------------------------
+
+class TestGenerateFragmentBlock:
+    def test_dpi_resistant_preset(self):
+        block = generate_fragment_block("DPI_Resistant")
+        assert block == {"packets": "1-3", "length": "100-200", "interval": "10-20"}
+
+    def test_low_latency_gaming_preset(self):
+        block = generate_fragment_block("Low_Latency_Gaming")
+        assert block["packets"] == "tlshello"
+
+    def test_unknown_preset_returns_empty(self):
+        assert generate_fragment_block("Ultra_Stable") == {}
+        assert generate_fragment_block("nonsense") == {}
+
+
+class TestGenerateNoiseBlock:
+    def test_dpi_resistant_preset(self):
+        block = generate_noise_block("DPI_Resistant")
+        assert block["type"] == "rand"
+        assert block["noise_payload_size"] == "500-1500"
+
+    def test_low_latency_gaming_preset(self):
+        block = generate_noise_block("Low_Latency_Gaming")
+        assert block["noise_payload_size"] == "100-300"
+
+    def test_unknown_preset_returns_empty(self):
+        assert generate_noise_block("Ultra_Stable") == {}
+
+
+class TestGetPresetConfig:
+    def test_dpi_resistant(self):
+        cfg = get_preset_config("DPI_Resistant")
+        assert cfg["utls"]["enabled"] is True
+        assert cfg["mux"]["enabled"] is False
+
+    def test_low_latency_gaming(self):
+        cfg = get_preset_config("Low_Latency_Gaming")
+        assert cfg["mux"]["enabled"] is True
+        assert cfg["udp_priority"] is True
+
+    def test_default_is_ultra_stable(self):
+        cfg = get_preset_config("anything-else")
+        assert cfg["mode"] == "Ultra_Stable"
+        assert cfg["utls"]["enabled"] is False
+
+
+class TestApplyDpiEvasionToOutbound:
+    def test_dpi_resistant_injects_fragment_outbound_and_dialer_proxy(self):
+        outbound = {"tag": "main", "streamSettings": {}}
+        result = apply_dpi_evasion_to_outbound(outbound, "DPI_Resistant")
+
+        assert len(result) == 2  # main outbound + fragment-out
+        assert result[1]["tag"] == "fragment-out"
+        assert outbound["streamSettings"]["sockopt"]["dialerProxy"] == "fragment-out"
+        assert outbound["noise"]["type"] == "rand"
+        assert outbound["streamSettings"]["tlsSettings"]["fingerprint"] == "chrome"
+
+    def test_ultra_stable_leaves_outbound_list_unchanged(self):
+        outbound = {"tag": "main", "streamSettings": {}}
+        result = apply_dpi_evasion_to_outbound(outbound, "Ultra_Stable")
+
+        assert len(result) == 1  # no fragment outbound injected
+        assert "noise" not in outbound
+        assert outbound["mux"] == {"enabled": False}
+
+    def test_low_latency_gaming_enables_mux_without_utls(self):
+        outbound = {"tag": "main", "streamSettings": {}}
+        apply_dpi_evasion_to_outbound(outbound, "Low_Latency_Gaming")
+        assert outbound["mux"]["enabled"] is True
+        assert "tlsSettings" not in outbound["streamSettings"]

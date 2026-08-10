@@ -981,6 +981,13 @@ class SNIMultiplexer:
 
         self._total_connections += 1
         self._active_connections += 1
+        # Bound before the try block: the finally clause below reads `sni`
+        # unconditionally, but the timeout/empty-connection paths `return`
+        # before Step 2 ever assigns it — an unset `sni` there raised
+        # UnboundLocalError out of the whole coroutine, which skipped
+        # writer.close()/wait_closed() and leaked the socket on every idle
+        # or timed-out probe connection.
+        sni: Optional[str] = None
 
         try:
             # ── Step 1: Read the ClientHello ──────────────────────────
@@ -999,7 +1006,6 @@ class SNIMultiplexer:
                 return
 
             # ── Step 2: Parse SNI ─────────────────────────────────────
-            sni: Optional[str] = None
             ja3: Optional[str] = None
             try:
                 hello = parse_client_hello(initial_data)

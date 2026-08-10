@@ -65,7 +65,7 @@ jobs:
         # measured but not currently included in the gate threshold — its
         # test suite has a pre-existing relative-import failure unrelated
         # to this gate that needs fixing separately.
-        # 72% is a safety margin below the real, currently-achieved ~74%
+        # 75% is a safety margin below the real, currently-achieved ~77%
         # as of 2026-08-10. Most of the 67% -> 73% jump came from a
         # .coveragerc fix, not new tests: coverage wasn't configured to
         # follow greenlet switches, which is how SQLAlchemy's async ORM
@@ -82,18 +82,26 @@ jobs:
         # traffic-accounting UPDATE threw on every single cycle under
         # SQLAlchemy 2.x and was silently swallowed, so quota suspension
         # never actually ran in production; see
-        # backend/app/core/accounting.py), auto_cdn.py 0%->95%, and
+        # backend/app/core/accounting.py), auto_cdn.py 0%->95%,
         # metrics.py 48%->93% (ConnectionManager broadcast/lifecycle +
         # the risk/quality scoring functions — the one genuine gap left
-        # by the .coveragerc fix; everything else it "fixed" already had
-        # real tests). Raise this number as coverage improves further,
-        # never lower it.
+        # by the .coveragerc fix), and routing_engine.py 59%->90%
+        # (SNIMultiplexer's connection handling, forwarding, decoy
+        # deflection, tarpit, and the DPI-evasion preset generator
+        # functions — also fixed a real bug found via testing:
+        # `_handle_connection`'s finally-block read `sni` before Step 2
+        # ever assigned it on the timeout/empty-connection early-return
+        # paths, raising UnboundLocalError out of the whole coroutine and
+        # skipping writer.close()/wait_closed() — a socket leak on every
+        # idle or timed-out probe connection; see
+        # backend/app/core/routing_engine.py). Raise this number as
+        # coverage improves further, never lower it.
         run: |
           pytest backend/tests/ \
             --asyncio-mode=auto \
             --cov=backend \
             --cov-report=term-missing \
-            --cov-fail-under=72
+            --cov-fail-under=75
 
   security-scan:
     runs-on: ubuntu-latest
