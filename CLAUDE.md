@@ -102,11 +102,23 @@ Established patterns worth reusing when adding tests:
 ### The bandit `# nosec` convention
 The bandit gate is blocking at zero findings. Anything intentional carries an inline `# nosec BXXX - one-line reason` (public-facing `0.0.0.0` binds, `verify=False` on self-signed node certs where HMAC signing provides integrity instead, the helper socket's restrictive `chmod 0o660`, the literal `cls`/`clear` shell call). When you hit a new finding, either fix it or add the same annotated form — do not flip the CI step back to `continue-on-error`.
 
-### Real code that isn't wired up yet
-Several modules are implemented and tested but nothing starts them at boot — don't mistake these for dead code, and don't assume they're running either:
-- `SNIMultiplexer` (`core/routing_engine.py`) — full SNI-routing/decoy-deflection TCP server, never instantiated in `lifespan()`.
-- `SingularityAutoCDN` (`core/auto_cdn.py`) — lifecycle works, but its two health-check hooks are deliberate `pass` stubs and nothing instantiates it.
-- `TrafficAccountingEngine` (`core/accounting.py`) — its docstring says "instantiated in main.py lifespan"; it currently isn't.
+### Known deferred decisions — engines that are NOT wired into `lifespan()`
+
+Three engines are fully implemented and well covered by tests, but nothing instantiates or starts them at boot. This is **deliberate, not an oversight or dead code** — don't delete them, and don't assume they're running when reasoning about production behaviour. Each was left dormant for a specific reason, and each needs verification before being switched on. Enabling any of them is a deployment decision: **ask the user first, present the risk, don't wire it up silently.** The wiring itself is ~5 lines per engine once they say yes.
+
+**`SNIMultiplexer` (`core/routing_engine.py`)** — full SNI-routing / active-probe-deflection TCP server.
+- *Why deferred:* it defaults to binding `0.0.0.0:443`. On a live panel that port is almost certainly already held by the API itself or by nginx, so starting it at boot could either fail the boot outright or hijack the panel's own listener.
+- *Before enabling:* confirm what actually owns :443 on the target host (`ss -lntp`); decide whether the mux fronts the API (mux on :443, API moved to a loopback port and registered as a backend via `add_backend`) or listens elsewhere; check it against `DECOY_REVERSE_PROXY_TARGET` being reachable, since unmatched SNI gets reverse-proxied there; verify `reuse_port=True` in `start()` behaves as intended on the deployment kernel.
+
+**`TrafficAccountingEngine` (`core/accounting.py`)** — quota enforcement. Its own docstring claims it is "instantiated in main.py lifespan"; it is not.
+- *Why deferred:* it **mutates user rows** — it sets `is_active = False` on users and agents over quota and pushes drop commands to nodes. It has never once executed successfully in production (its bulk `UPDATE` threw on every cycle under SQLAlchemy 2.x until that was fixed), so the first real run is also the first time anyone's quota is ever enforced. Whether the existing `data_used_bytes` / `traffic_used_bytes` values are trustworthy enough to suspend accounts against is a business call.
+- *Before enabling:* audit current usage counters against real limits first (`SELECT username, data_used_bytes, data_limit_bytes FROM users WHERE data_limit_bytes > 0 AND data_used_bytes >= data_limit_bytes`) to see exactly who would be suspended on the first cycle; same for `agents`. Confirm something actually calls `ingest_traffic()` — no node-side pusher is wired today, so with no input it would enforce against stale counters only. Consider a dry-run mode (log intended suspensions without committing) for the first deployment.
+
+**`SingularityAutoCDN` (`core/auto_cdn.py`)** — Cloudflare/SNI-rotation engine.
+- *Why deferred:* **`_check_sni_health()` and `_manage_auto_cdn()` are still literal `pass` stubs** (`# To be implemented fully`). The start/stop lifecycle and the 60-second run loop work and are tested, but the loop calls two no-ops — starting it just burns a task doing nothing every 60s.
+- *Before enabling:* implement the two hooks first. There is nothing to verify or gain until then.
+
+Related: the XDP stats file that `cli.py` and `telegram_bot/` read (`/run/mtgroup/xdp_stats.json`) has **no writer anywhere** — both readers degrade gracefully to zeroed stats, so those displays are permanently zero until an exporter is written.
 - The XDP stats file that `cli.py` and the Telegram bot read (`/run/mtgroup/xdp_stats.json`) has no writer yet; both readers degrade to zeroed stats.
 
 ### Licensing boundary (established, durable)
