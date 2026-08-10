@@ -18,6 +18,13 @@ PyJWT>=2.9.0
 cryptography>=43.0.0
 argon2-cffi>=23.1.0
 
+# ── Post-Quantum (ML-KEM-768 / Kyber-768, FIPS 203, via PQClean) ──
+# Real PQC, not a simulation — see backend/app/core/crypto_quantum.py.
+# Ships prebuilt wheels for common platforms; if a wheel is unavailable
+# for a given target, KyberKeyExchange falls back to the old classical
+# AES-GCM simulation with a loud runtime warning (never silently).
+pqcrypto>=0.4.0
+
 # ── HTTP Client ───────────────────────────────────────────────
 httpx>=0.27.0
 

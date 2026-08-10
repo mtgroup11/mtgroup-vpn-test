@@ -153,6 +153,10 @@ mtgroup.log
 audit.log
 test_output.txt
 
+# Generated post-quantum server keypair (encrypted at rest, but still
+# secret material — never commit)
+.mtgroup_kyber_server.key
+
 # IDEs
 .idea/
 .vscode/

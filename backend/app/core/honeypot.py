@@ -144,13 +144,14 @@ class HoneypotEngine:
                 if "/admin/backup.sql.zip" in request or "/.env" in request:
                     logger.critical(f"[LETHAL HONEYPOT] Active Probe requested sensitive file: {addr[0]}")
                     reason = "LETHAL_PROBE: Attempted to access decoy sensitive files"
-                    # Pass TTL=0 or very large for permanent ban (or orchestrator handles it).
-                    # Actually orchestrator's handle_security_alert currently uses 300s. We will just use the standard alert for now
-                    if getattr(settings, 'EBPF_ENABLED', False):
-                        await orchestrator.handle_security_alert(addr[0], reason)
-                    else:
-                        logger.warning(f"eBPF Disabled. Skipping XDP blacklist for probe {addr[0]}.")
-                    
+                    # handle_security_alert() already branches internally on
+                    # EBPF_ENABLED (XDP blacklist vs. the app-level ban set
+                    # enforced by stealth_middleware) — gating the call
+                    # itself on EBPF_ENABLED meant probes were never banned
+                    # at all when eBPF was disabled, silently defeating the
+                    # "lethal" honeypot with no error or warning.
+                    await orchestrator.handle_security_alert(addr[0], reason)
+
                 response = NGINX_404_RESPONSE.replace(b"{date}", current_date)
                 
             writer.write(response)

@@ -1,7 +1,9 @@
 """
 MTGroup VPN Ultimate — Zero-Knowledge Cryptography & Post-Quantum Shield
 AES-GCM-256 field-level encryption for database PII protection,
-HKDF-SHA256 key derivation, and post-quantum Kyber-768 KEM mockup.
+HKDF-SHA256 key derivation, and post-quantum ML-KEM-768 (Kyber-768) KEM
+— real when the `pqcrypto` dependency is available, classical simulation
+fallback otherwise (see HAS_PQCRYPTO / KyberKeyExchange below).
 
 The database stores ZERO plaintext PII. Every sensitive field is encrypted
 at the ORM layer using a custom SQLAlchemy TypeDecorator before it ever
@@ -15,6 +17,7 @@ import hashlib
 import logging
 import os
 import secrets
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from cryptography.hazmat.primitives import hashes
@@ -23,6 +26,23 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import Text, TypeDecorator
 
 logger = logging.getLogger("mtgroup.core.crypto_quantum")
+
+# ---------------------------------------------------------------------------
+# Real ML-KEM-768 (Kyber-768, FIPS 203) via PQClean bindings, when available
+# ---------------------------------------------------------------------------
+# Mirrors the bcc/HAS_BCC graceful-degradation pattern used elsewhere in this
+# codebase: prefer the real implementation, fall back loudly (never silently)
+# to the classical simulation when the optional dependency isn't installed
+# for this platform.
+try:
+    from pqcrypto.kem.ml_kem_768 import (
+        generate_keypair as _mlkem_generate_keypair,
+        encrypt as _mlkem_encapsulate,
+        decrypt as _mlkem_decapsulate,
+    )
+    HAS_PQCRYPTO = True
+except ImportError:
+    HAS_PQCRYPTO = False
 
 
 # ---------------------------------------------------------------------------
@@ -319,19 +339,24 @@ class EncryptedType(TypeDecorator):
 
 class KyberKeyExchange:
     """
-    Post-quantum key exchange mockup matching the NIST-standardised
-    ML-KEM (Kyber-768) API surface.
+    Post-quantum key exchange — ML-KEM-768 (Kyber-768, NIST FIPS 203).
+
+    When the optional ``pqcrypto`` dependency (PQClean bindings) is
+    installed for the current platform, every operation below is the
+    **real** algorithm — genuinely quantum-resistant, not a simulation.
 
     .. warning::
 
-        This is a **simulation** that uses classical ``AESGCM`` +
-        ``HKDF`` internally.  It is **not** quantum-resistant.
-        Replace with ``liboqs`` / ``PQClean`` bindings for real
-        post-quantum security.
+        If ``pqcrypto`` is *not* available (no prebuilt wheel for this
+        platform), this class transparently falls back to a classical
+        ``AESGCM`` + ``HKDF`` simulation that only reproduces the byte
+        sizes below — **not quantum-resistant**. A loud warning is logged
+        (once) whenever the fallback path is used; check
+        ``KyberKeyExchange.using_real_pqc`` or ``HAS_PQCRYPTO`` to verify
+        which mode is active before relying on the security property.
 
-    The class faithfully reproduces Kyber-768 byte sizes so that
-    serialisation, network framing, and integration tests are
-    realistic:
+    Byte sizes (identical in both real and fallback mode, matching the
+    ML-KEM-768 spec exactly):
 
     ============  =============
     Parameter     Bytes
@@ -348,52 +373,45 @@ class KyberKeyExchange:
     CIPHERTEXT_SIZE: int = 1088
     SHARED_SECRET_SIZE: int = 32
 
+    using_real_pqc: bool = HAS_PQCRYPTO
+    _fallback_warned: bool = False
+
     def __init__(self) -> None:
         self._public_key: Optional[bytes] = None
         self._secret_key: Optional[bytes] = None
+        if not HAS_PQCRYPTO and not KyberKeyExchange._fallback_warned:
+            logger.warning(
+                "pqcrypto is not installed/available for this platform — "
+                "KyberKeyExchange is running the CLASSICAL SIMULATION "
+                "fallback. This is NOT quantum-resistant. Install "
+                "`pqcrypto>=0.4.0` for real ML-KEM-768."
+            )
+            KyberKeyExchange._fallback_warned = True
 
     # ── Key Generation ────────────────────────────────────────
 
     def generate_keypair(self) -> Tuple[bytes, bytes]:
-        """
-        Generate a Kyber-768 keypair.
-
-        The secret key embeds the public key as its first
-        ``PUBLIC_KEY_SIZE`` bytes — this mirrors the real Kyber spec
-        and allows ``decapsulate`` to recover ``pk`` from ``sk``.
-
-        Returns:
-            ``(public_key, secret_key)`` tuple.
-        """
-        self._public_key = secrets.token_bytes(self.PUBLIC_KEY_SIZE)
-        extra_secret = secrets.token_bytes(
-            self.SECRET_KEY_SIZE - self.PUBLIC_KEY_SIZE,
-        )
-        self._secret_key = self._public_key + extra_secret
+        """Generate an ML-KEM-768 keypair. Returns ``(public_key, secret_key)``."""
+        if HAS_PQCRYPTO:
+            self._public_key, self._secret_key = _mlkem_generate_keypair()
+        else:
+            self._public_key, self._secret_key = self._sim_generate_keypair()
 
         logger.debug(
-            "Kyber-768 keypair generated — pk=%d B, sk=%d B",
-            len(self._public_key),
-            len(self._secret_key),
+            "ML-KEM-768 keypair generated (real=%s) — pk=%d B, sk=%d B",
+            HAS_PQCRYPTO, len(self._public_key), len(self._secret_key),
         )
         return self._public_key, self._secret_key
 
     # ── Encapsulation ─────────────────────────────────────────
 
-    def encapsulate(
-        self,
-        public_key: bytes,
-    ) -> Tuple[bytes, bytes]:
+    def encapsulate(self, public_key: bytes) -> Tuple[bytes, bytes]:
         """
         Encapsulate: produce a *ciphertext* and a *shared secret*
         that only the holder of the matching secret key can recover.
 
-        Internally wraps a random 32-byte seed with AES-GCM keyed
-        from the public key, then derives the shared secret via HKDF
-        bound to a hash of ``pk``.
-
         Args:
-            public_key: Recipient's Kyber public key (1 184 bytes).
+            public_key: Recipient's public key (1 184 bytes).
 
         Returns:
             ``(ciphertext, shared_secret)`` — ciphertext is 1 088 B,
@@ -408,49 +426,20 @@ class KyberKeyExchange:
                 f"got {len(public_key)}"
             )
 
-        raw_seed = secrets.token_bytes(32)
-
-        # Key for wrapping the seed — derived from pk
-        wrap_key = derive_key(
-            master_key=public_key[:32],
-            context=b"mtgroup-kyber768-seed-wrap-key",
-            length=32,
-        )
-
-        # Encrypt the seed with AES-GCM
-        aesgcm = AESGCM(wrap_key)
-        nonce = os.urandom(12)
-        encrypted_seed = aesgcm.encrypt(nonce, raw_seed, None)
-        # encrypted_seed = 32 (plaintext) + 16 (tag) = 48 bytes
-
-        # Build the ciphertext: nonce(12) + encrypted_seed(48) + padding
-        ct_core = nonce + encrypted_seed  # 60 bytes
-        padding_len = self.CIPHERTEXT_SIZE - len(ct_core)
-        ciphertext = ct_core + secrets.token_bytes(max(padding_len, 0))
-
-        # Derive the shared secret bound to the public key
-        pk_fingerprint = hashlib.sha256(public_key).digest()
-        shared_secret = derive_key(
-            master_key=raw_seed,
-            context=b"mtgroup-kyber768-kem-shared-secret",
-            salt=pk_fingerprint,
-            length=self.SHARED_SECRET_SIZE,
-        )
+        if HAS_PQCRYPTO:
+            ciphertext, shared_secret = _mlkem_encapsulate(public_key)
+        else:
+            ciphertext, shared_secret = self._sim_encapsulate(public_key)
 
         logger.debug(
-            "Kyber encapsulation — ct=%d B, ss=%d B",
-            len(ciphertext),
-            len(shared_secret),
+            "KEM encapsulation (real=%s) — ct=%d B, ss=%d B",
+            HAS_PQCRYPTO, len(ciphertext), len(shared_secret),
         )
         return ciphertext, shared_secret
 
     # ── Decapsulation ─────────────────────────────────────────
 
-    def decapsulate(
-        self,
-        ciphertext: bytes,
-        secret_key: bytes,
-    ) -> bytes:
+    def decapsulate(self, ciphertext: bytes, secret_key: bytes) -> bytes:
         """
         Decapsulate: recover the shared secret from a ciphertext
         using the recipient's secret key.
@@ -465,8 +454,6 @@ class KyberKeyExchange:
 
         Raises:
             ValueError: Size mismatch on inputs.
-            cryptography.exceptions.InvalidTag: Ciphertext was
-                tampered with or wrong key was used.
         """
         if len(ciphertext) != self.CIPHERTEXT_SIZE:
             raise ValueError(
@@ -479,34 +466,61 @@ class KyberKeyExchange:
                 f"got {len(secret_key)}"
             )
 
-        # Recover the embedded public key
-        pk = secret_key[: self.PUBLIC_KEY_SIZE]
+        if HAS_PQCRYPTO:
+            shared_secret = _mlkem_decapsulate(secret_key, ciphertext)
+        else:
+            shared_secret = self._sim_decapsulate(ciphertext, secret_key)
 
-        # Re-derive the same wrap key
+        logger.debug("KEM decapsulation (real=%s) — ss=%d B", HAS_PQCRYPTO, len(shared_secret))
+        return shared_secret
+
+    # ── Classical simulation fallback (used only if pqcrypto is absent) ──
+
+    def _sim_generate_keypair(self) -> Tuple[bytes, bytes]:
+        public_key = secrets.token_bytes(self.PUBLIC_KEY_SIZE)
+        extra_secret = secrets.token_bytes(self.SECRET_KEY_SIZE - self.PUBLIC_KEY_SIZE)
+        return public_key, public_key + extra_secret
+
+    def _sim_encapsulate(self, public_key: bytes) -> Tuple[bytes, bytes]:
+        raw_seed = secrets.token_bytes(32)
         wrap_key = derive_key(
-            master_key=pk[:32],
+            master_key=public_key[:32],
             context=b"mtgroup-kyber768-seed-wrap-key",
             length=32,
         )
-
-        # Extract nonce + encrypted seed from ciphertext
-        nonce = ciphertext[:12]
-        encrypted_seed = ciphertext[12:60]  # 48 bytes
-
         aesgcm = AESGCM(wrap_key)
-        raw_seed = aesgcm.decrypt(nonce, encrypted_seed, None)
-
-        # Derive the shared secret with the same pk fingerprint
-        pk_fingerprint = hashlib.sha256(pk).digest()
+        nonce = os.urandom(12)
+        encrypted_seed = aesgcm.encrypt(nonce, raw_seed, None)  # 48 bytes
+        ct_core = nonce + encrypted_seed  # 60 bytes
+        padding_len = self.CIPHERTEXT_SIZE - len(ct_core)
+        ciphertext = ct_core + secrets.token_bytes(max(padding_len, 0))
+        pk_fingerprint = hashlib.sha256(public_key).digest()
         shared_secret = derive_key(
             master_key=raw_seed,
             context=b"mtgroup-kyber768-kem-shared-secret",
             salt=pk_fingerprint,
             length=self.SHARED_SECRET_SIZE,
         )
+        return ciphertext, shared_secret
 
-        logger.debug("Kyber decapsulation — ss=%d B", len(shared_secret))
-        return shared_secret
+    def _sim_decapsulate(self, ciphertext: bytes, secret_key: bytes) -> bytes:
+        pk = secret_key[: self.PUBLIC_KEY_SIZE]
+        wrap_key = derive_key(
+            master_key=pk[:32],
+            context=b"mtgroup-kyber768-seed-wrap-key",
+            length=32,
+        )
+        nonce = ciphertext[:12]
+        encrypted_seed = ciphertext[12:60]
+        aesgcm = AESGCM(wrap_key)
+        raw_seed = aesgcm.decrypt(nonce, encrypted_seed, None)
+        pk_fingerprint = hashlib.sha256(pk).digest()
+        return derive_key(
+            master_key=raw_seed,
+            context=b"mtgroup-kyber768-kem-shared-secret",
+            salt=pk_fingerprint,
+            length=self.SHARED_SECRET_SIZE,
+        )
 
     # ── Properties ────────────────────────────────────────────
 
@@ -617,19 +631,64 @@ _server_kyber_kem = None
 _server_kyber_pk = None
 _server_kyber_sk = None
 
+# Persisted keypair location. A real ML-KEM-768 secret key is not "any
+# 2400 random-looking bytes" — it has lattice-encoded internal structure
+# that only the algorithm's own keygen produces, so (unlike the old
+# HKDF-derived mock key) it cannot be deterministically re-derived from
+# DB_ENCRYPTION_KEY on every restart. It is generated once via
+# `generate_keypair()` and persisted here (encrypted at rest with the
+# same master key used for field encryption) so JWTs wrapped before a
+# restart can still be unwrapped after one.
+_KYBER_SERVER_KEY_FILE = (
+    Path(__file__).resolve().parent.parent.parent.parent / ".mtgroup_kyber_server.key"
+)
+
+
 def _ensure_kyber_keys():
     global _server_kyber_kem, _server_kyber_pk, _server_kyber_sk
-    if _server_kyber_kem is None:
-        master_key = _get_encryption_key()
-        pk = derive_key(master_key, b"mtgroup-server-kyber-pk", KyberKeyExchange.PUBLIC_KEY_SIZE)
-        extra_secret = derive_key(master_key, b"mtgroup-server-kyber-extra-sk", KyberKeyExchange.SECRET_KEY_SIZE - KyberKeyExchange.PUBLIC_KEY_SIZE)
-        sk = pk + extra_secret
+    if _server_kyber_kem is not None:
+        return
+
+    kem = KyberKeyExchange()
+
+    if _KYBER_SERVER_KEY_FILE.exists():
+        try:
+            encrypted_blob = _KYBER_SERVER_KEY_FILE.read_bytes()
+            raw = decrypt_bytes(encrypted_blob, aad=b"mtgroup-kyber-server-keypair")
+            pk, sk = raw[: KyberKeyExchange.PUBLIC_KEY_SIZE], raw[KyberKeyExchange.PUBLIC_KEY_SIZE :]
+            if len(pk) == KyberKeyExchange.PUBLIC_KEY_SIZE and len(sk) == KyberKeyExchange.SECRET_KEY_SIZE:
+                kem._public_key, kem._secret_key = pk, sk
+                logger.info("Loaded persisted server Kyber keypair from disk")
+            else:
+                raise ValueError("persisted keypair has unexpected size")
+        except Exception as exc:
+            logger.error(
+                "Failed to load persisted Kyber keypair (%s) — generating a "
+                "fresh one. Any outstanding QUANTUM_SHIELD-wrapped JWTs "
+                "issued before now will fail to unwrap.", exc,
+            )
+            kem = None
+
+    if kem is None or kem.public_key is None:
         kem = KyberKeyExchange()
-        kem._public_key = pk
-        kem._secret_key = sk
-        _server_kyber_kem = kem
-        _server_kyber_pk = pk
-        _server_kyber_sk = sk
+        pk, sk = kem.generate_keypair()
+        try:
+            blob = encrypt_bytes(pk + sk, aad=b"mtgroup-kyber-server-keypair")
+            _KYBER_SERVER_KEY_FILE.write_bytes(blob)
+            try:
+                os.chmod(_KYBER_SERVER_KEY_FILE, 0o600)
+            except OSError:
+                pass
+            logger.info("Generated and persisted a new server Kyber keypair")
+        except OSError as exc:
+            logger.warning(
+                "Could not persist server Kyber keypair to disk (%s) — a "
+                "fresh one will be generated on every restart.", exc,
+            )
+
+    _server_kyber_kem = kem
+    _server_kyber_pk = kem.public_key
+    _server_kyber_sk = kem.secret_key
 
 def wrap_jwt_quantum(jwt_token: str) -> str:
     """
