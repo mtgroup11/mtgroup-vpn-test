@@ -82,6 +82,67 @@ class NoAddressesAvailable(RuntimeError):
     """The node's tunnel subnet is fully allocated."""
 
 
+async def revoke_peers(
+    session: AsyncSession,
+    *,
+    subscription_ids: list[int],
+) -> int:
+    """
+    Deregister peers from their nodes and delete the rows.
+
+    Deleting the database row alone does **not** revoke access: the peer is
+    still in the node's WireGuard config, so the tunnel keeps working with
+    the key the user already holds. `wireguard_peers` cascades from
+    `subscriptions`, which made deleting a user look like it revoked access
+    while the node happily kept serving them. The node has to be told.
+
+    Returns the number of peers deregistered. Failures are logged rather
+    than raised — a node being unreachable must not block deleting a user,
+    but it does leave a stale peer, so it is logged at ERROR.
+    """
+    if not subscription_ids:
+        return 0
+
+    # Local import: orchestrator imports models, which would otherwise
+    # close an import cycle through this module.
+    from backend.app.models import Node, NodeProtocol
+    from backend.app.orchestrator import orchestrator
+
+    result = await session.execute(
+        select(WireGuardPeer, Node)
+        .join(Node, Node.id == WireGuardPeer.node_id)
+        .where(WireGuardPeer.subscription_id.in_(subscription_ids))
+    )
+    rows = result.all()
+
+    revoked = 0
+    for peer, node in rows:
+        try:
+            ok = await orchestrator.sync_node_config(
+                node,
+                {
+                    "config_type": NodeProtocol.AMNEZIA_WG.value,
+                    "payload": {"action": "remove_peer", "public_key": peer.public_key},
+                },
+            )
+            if ok:
+                revoked += 1
+            else:
+                logger.error(
+                    "Could not deregister peer %s from node %s (%s) — the peer "
+                    "remains active on that node and must be removed manually.",
+                    peer.public_key[:16], node.id, node.name,
+                )
+        except Exception as exc:  # noqa: BLE001 - never block the caller
+            logger.error(
+                "Error deregistering peer %s from node %s: %s",
+                peer.public_key[:16], node.id, exc,
+            )
+        await session.delete(peer)
+
+    return revoked
+
+
 async def get_or_create_peer(
     session: AsyncSession,
     *,

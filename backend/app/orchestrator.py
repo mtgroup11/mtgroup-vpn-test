@@ -175,10 +175,16 @@ class NodeOrchestrator:
         except Exception as e:
             logger.error("Failed to mark node %s offline: %s", node_id, e)
 
-    async def sync_node_config(self, node: Node, config_payload: dict[str, Any]):
+    async def sync_node_config(self, node: Node, config_payload: dict[str, Any]) -> bool:
         """
         Node'a güncel VPN konfigürasyonunu pushlar (Deployment).
         Eğer başarısız olursa Retry kuyruğuna atar.
+
+        Returns True when the node accepted the command. Callers that must
+        know whether it actually landed — peer registration, for instance,
+        where handing the user a config the node hasn't been told about
+        produces a tunnel that silently never connects — check this rather
+        than assuming success.
         """
         try:
             response = await self._send_request(
@@ -191,10 +197,11 @@ class NodeOrchestrator:
             )
             response.raise_for_status()
             logger.info("Successfully synced config to Node %s (%s)", node.id, node.name)
+            return True
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning("Failed to sync Node %s (%s): %s. Queuing for retry.", node.id, node.name, e)
             await self._mark_node_offline(node.id)
-            
+
             # İlk başarısızlıkta kuyruğa at (30 saniye sonra dene)
             task = RetryTask(
                 node_id=node.id,
@@ -208,6 +215,7 @@ class NodeOrchestrator:
                 next_retry_at=time.time() + 30.0
             )
             await self._retry_queue.put(task)
+            return False
 
     async def check_node_health(self, node: Node):
         """

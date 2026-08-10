@@ -168,6 +168,10 @@ class NodeCreate(BaseModel):
     port_hop_interval_sec: int = Field(default=1, ge=1, le=60)
 
     # AmneziaWG parameters
+    # WireGuard server identity + tunnel subnet. Distinct from
+    # reality_public_key, which belongs to VLESS-Reality.
+    amnezia_server_public_key: Optional[str] = Field(default=None, max_length=128)
+    amnezia_subnet: str = Field(default="10.8.0.0/24", max_length=64)
     amnezia_jc: int = Field(default=4, ge=0, le=128)
     amnezia_jmin: int = Field(default=40, ge=0, le=1280)
     amnezia_jmax: int = Field(default=70, ge=0, le=1280)
@@ -202,6 +206,8 @@ class NodeUpdate(BaseModel):
     port_pool_high_start: Optional[int] = None
     port_pool_high_end: Optional[int] = None
     port_hop_interval_sec: Optional[int] = None
+    amnezia_server_public_key: Optional[str] = None
+    amnezia_subnet: Optional[str] = None
     amnezia_jc: Optional[int] = None
     amnezia_jmin: Optional[int] = None
     amnezia_jmax: Optional[int] = None
@@ -229,6 +235,8 @@ class NodeResponse(BaseModel):
     port_pool_high_start: int
     port_pool_high_end: int
     port_hop_interval_sec: int
+    amnezia_server_public_key: Optional[str] = None
+    amnezia_subnet: str = "10.8.0.0/24"
     amnezia_jc: int
     amnezia_jmin: int
     amnezia_jmax: int

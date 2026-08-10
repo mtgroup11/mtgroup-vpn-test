@@ -63,6 +63,8 @@ async def create_node(
         port_pool_high_start=body.port_pool_high_start,
         port_pool_high_end=body.port_pool_high_end,
         port_hop_interval_sec=body.port_hop_interval_sec,
+        amnezia_server_public_key=body.amnezia_server_public_key,
+        amnezia_subnet=body.amnezia_subnet,
         amnezia_jc=body.amnezia_jc,
         amnezia_jmin=body.amnezia_jmin,
         amnezia_jmax=body.amnezia_jmax,

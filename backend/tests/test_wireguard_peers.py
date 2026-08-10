@@ -164,6 +164,81 @@ class TestGetOrCreatePeer:
         assert plaintext not in raw
 
 
+class TestRevokePeers:
+    @pytest.mark.asyncio
+    async def test_tells_the_node_to_forget_the_peer(self, wg_env, monkeypatch):
+        """
+        Deleting the row is not revocation. The peer lives in the node's
+        WireGuard config, so unless the node is told, the key the user
+        already holds keeps working — deleting a user would *look* like it
+        revoked access while their tunnel stayed up.
+        """
+        from backend.app.core.wireguard_peers import revoke_peers
+
+        session, sub, node = wg_env
+        peer, _ = await get_or_create_peer(session, subscription_id=sub.id, node=node)
+        await session.commit()
+        public_key = peer.public_key
+
+        pushed = []
+
+        async def _fake_sync(target_node, payload):
+            pushed.append(payload)
+            return True
+
+        monkeypatch.setattr("backend.app.orchestrator.orchestrator.sync_node_config", _fake_sync)
+
+        revoked = await revoke_peers(session, subscription_ids=[sub.id])
+        await session.commit()
+
+        assert revoked == 1
+        assert pushed[0]["payload"]["action"] == "remove_peer"
+        assert pushed[0]["payload"]["public_key"] == public_key
+
+        from sqlalchemy import select as sa_select
+
+        from backend.app.models import WireGuardPeer
+
+        remaining = (
+            await session.execute(sa_select(WireGuardPeer).where(WireGuardPeer.subscription_id == sub.id))
+        ).scalars().all()
+        assert remaining == []
+
+    @pytest.mark.asyncio
+    async def test_unreachable_node_does_not_block_revocation(self, wg_env, monkeypatch):
+        """An offline node must not make deleting a user impossible."""
+        from backend.app.core.wireguard_peers import revoke_peers
+
+        session, sub, node = wg_env
+        await get_or_create_peer(session, subscription_id=sub.id, node=node)
+        await session.commit()
+
+        async def _failing_sync(target_node, payload):
+            return False
+
+        monkeypatch.setattr("backend.app.orchestrator.orchestrator.sync_node_config", _failing_sync)
+
+        revoked = await revoke_peers(session, subscription_ids=[sub.id])
+        await session.commit()
+
+        assert revoked == 0  # reported as not deregistered...
+        from sqlalchemy import select as sa_select
+
+        from backend.app.models import WireGuardPeer
+
+        remaining = (
+            await session.execute(sa_select(WireGuardPeer).where(WireGuardPeer.subscription_id == sub.id))
+        ).scalars().all()
+        assert remaining == []  # ...but the row is still cleaned up
+
+    @pytest.mark.asyncio
+    async def test_empty_input_is_a_noop(self, wg_env):
+        from backend.app.core.wireguard_peers import revoke_peers
+
+        session, _, _ = wg_env
+        assert await revoke_peers(session, subscription_ids=[]) == 0
+
+
 class TestAddressUniquenessIsEnforcedByTheDatabase:
     @pytest.mark.asyncio
     async def test_duplicate_ip_on_one_node_is_rejected(self, wg_env):

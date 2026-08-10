@@ -18,6 +18,7 @@ from backend.app.api.auth import get_db, require_admin, require_admin_or_reselle
 from backend.app.core.config import settings
 from backend.app.core.logging_config import audit_logger
 from backend.app.core.security import generate_subscription_token, hash_password
+from backend.app.core.wireguard_peers import revoke_peers
 from backend.app.models import Subscription, User
 from backend.app.schemas import (
     MessageResponse,
@@ -299,6 +300,18 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     username = user.username
+
+    # Deregister any WireGuard peers *before* deleting. The rows cascade
+    # away with the user, but the peer stays in the node's config unless
+    # the node is told — so deleting a user would look like it revoked
+    # access while their tunnel kept working.
+    sub_ids = (
+        await db.execute(select(Subscription.id).where(Subscription.user_id == user.id))
+    ).scalars().all()
+    revoked = await revoke_peers(db, subscription_ids=list(sub_ids))
+    if revoked:
+        logger.info("Deregistered %d WireGuard peer(s) for %s", revoked, username)
+
     await db.delete(user)
     await db.commit()
 
@@ -374,6 +387,17 @@ async def regenerate_subscription(
     carried_protocols = old_sub_rows[0].protocols if old_sub_rows else json.dumps(settings.default_protocol_list)
     for sub in old_sub_rows:
         sub.is_active = False
+
+    # Regenerating exists to revoke a leaked subscription token, so the
+    # WireGuard peers tied to the old subscription have to go too. Marking
+    # the subscription inactive only stops *new* config downloads — the key
+    # the user already holds keeps working until the node forgets the peer.
+    revoked = await revoke_peers(db, subscription_ids=[s.id for s in old_sub_rows])
+    if revoked:
+        logger.info(
+            "Deregistered %d WireGuard peer(s) while regenerating %s's subscription",
+            revoked, user.username,
+        )
 
     # Create new subscription
     new_sub = Subscription(

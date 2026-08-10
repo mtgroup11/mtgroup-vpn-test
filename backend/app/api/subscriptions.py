@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import get_db
 from backend.app.core.config import settings
+from backend.app.core.wireguard_peers import NoAddressesAvailable, get_or_create_peer
 from backend.app.generators.generator_amnezia import generate_amnezia_conf
 from backend.app.generators.generator_clash import (
     generate_clash_config,
@@ -34,6 +35,7 @@ from backend.app.generators.generator_tuic import generate_tuic_link, generate_t
 from backend.app.generators.generator_vless import generate_vless_reality_link
 from backend.app.generators.generator_hysteria2 import generate_hysteria2_json_config
 from backend.app.models import Node, NodeProtocol, Subscription, User
+from backend.app.orchestrator import orchestrator
 
 logger = logging.getLogger("mtgroup.api.subscriptions")
 router = APIRouter(tags=["Subscriptions"])
@@ -398,7 +400,16 @@ async def get_amnezia_config(
     token: str,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Generate AmneziaWG .conf file."""
+    """
+    Return a working AmneziaWG .conf for this subscription.
+
+    "Working" is the whole point: the peer is allocated once and stored,
+    then registered on the node before the config is handed over. Earlier
+    this endpoint minted a throwaway keypair per request and told the node
+    nothing, so the file it returned could never complete a handshake —
+    and refetching produced a different key, invalidating whatever the
+    user had already installed.
+    """
     user, sub = await _get_user_by_sub_token(token, db)
     nodes = await _get_active_nodes(db)
 
@@ -412,10 +423,71 @@ async def get_amnezia_config(
     node = awg_nodes[0]
     address = node.floating_ip or node.address
 
+    # The node's WireGuard identity. NOT reality_public_key — that's an
+    # x25519 key for VLESS-Reality and belongs to a different protocol
+    # entirely; using it here produced configs pointing at a key the
+    # WireGuard server does not hold.
+    if not node.amnezia_server_public_key:
+        logger.error(
+            "Node %s (%s) is marked amnezia_wg but has no "
+            "amnezia_server_public_key — it has not been provisioned.",
+            node.id, node.name,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AmneziaWG node is not fully provisioned yet "
+                "(missing server public key)"
+            ),
+        )
+
+    try:
+        peer, created = await get_or_create_peer(db, subscription_id=sub.id, node=node)
+    except NoAddressesAvailable:
+        logger.error("Node %s (%s) has exhausted its tunnel subnet", node.id, node.name)
+        raise HTTPException(
+            status_code=503, detail="AmneziaWG node has no free tunnel addresses",
+        ) from None
+
+    # Register the peer on the node. Without this the client's public key is
+    # unknown to the server and the tunnel cannot come up, so a failure here
+    # must not be silent — but it also shouldn't lose the allocation, which
+    # is why is_synced_to_node is tracked and retried on the next fetch.
+    if created or not peer.is_synced_to_node:
+        synced = await orchestrator.sync_node_config(
+            node,
+            {
+                "config_type": NodeProtocol.AMNEZIA_WG.value,
+                "payload": {
+                    "action": "add_peer",
+                    "public_key": peer.public_key,
+                    "allowed_ips": f"{peer.assigned_ip}/32",
+                },
+            },
+        )
+        peer.is_synced_to_node = bool(synced)
+        await db.commit()
+
+        if not peer.is_synced_to_node:
+            logger.error(
+                "Could not register peer for subscription %s on node %s — "
+                "returning 503 rather than a config that cannot connect.",
+                sub.id, node.id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not register your device with the VPN node. "
+                    "Please try again shortly."
+                ),
+            )
+
     conf = generate_amnezia_conf(
-        server_public_key=node.reality_public_key or "PLACEHOLDER_PUBLIC_KEY",
+        server_public_key=node.amnezia_server_public_key,
         server_endpoint=address,
         server_port=node.port,
+        client_private_key=peer.private_key,
+        client_address=f"{peer.assigned_ip}/32",
         jc=node.amnezia_jc,
         jmin=node.amnezia_jmin,
         jmax=node.amnezia_jmax,
