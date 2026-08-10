@@ -2,9 +2,32 @@
 MTGroup VPN Ultimate — Remote Node Daemon
 ═══════════════════════════════════════════════════════════════════
 Lightweight background agent for remote servers.
-Receives sync requests from the Master panel, verifies HMAC-SHA256,
-applies configs (Xray/Sing-box), and restarts services.
-Reports health metrics (CPU, RAM, active connections).
+Receives commands from the Master panel over ``POST /api/v1/sync``,
+verifies HMAC-SHA256 + a ±30s replay window, applies them to the local
+Xray/Sing-box config, and restarts the service.
+Reports health metrics over ``GET /api/v1/health``.
+
+Command protocol (``action`` lives inside ``payload``; absent means
+``sync``)::
+
+    sync         payload IS the complete proxy config → written wholesale
+    drop_user    {"action": "drop_user",   "user_uuid": "<id|email|name>"}
+    update_port  {"action": "update_port", "new_port": 8443}
+
+``drop_user`` and ``update_port`` are *surgical*: they load the existing
+config, mutate it, and write it back. They never replace it.
+
+Anything with an unrecognised ``action``, and any ``sync`` whose payload
+doesn't structurally look like a proxy config, is rejected with 400 and
+the on-disk config is left untouched.
+
+This matters because the master multiplexes all of the above through one
+endpoint. The previous implementation ignored ``action`` entirely and
+wrote whatever arrived straight over ``config.json`` before restarting —
+so a ``{"action": "drop_user", ...}`` command (2 keys) replaced the
+node's entire configuration and took every user on that node offline.
+Writes are atomic (temp file + ``os.replace``) so a crash mid-write can't
+leave a truncated config either.
 """
 
 import asyncio
@@ -14,6 +37,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import time
 
 from aiohttp import web
@@ -43,6 +67,126 @@ def verify_signature(api_key: str, signature: str, body_bytes: bytes) -> bool:
     ).hexdigest()
     
     return hmac.compare_digest(expected_mac, signature)
+
+
+def resolve_target(config_type: str) -> tuple[str, str]:
+    """Map a config_type label to its on-disk config path and systemd unit."""
+    lowered = (config_type or "").lower()
+    if "singbox" in lowered or "sing-box" in lowered:
+        return "/etc/sing-box/config.json", "sing-box"
+    if "xray" in lowered or "vless" in lowered or "trojan" in lowered:
+        return "/usr/local/etc/xray/config.json", "xray"
+    logger.warning("Unknown config_type %r — defaulting to xray.", config_type)
+    return "/usr/local/etc/xray/config.json", "xray"
+
+
+def looks_like_full_config(payload: object) -> bool:
+    """
+    Guard against overwriting a live proxy config with something that
+    plainly isn't one.
+
+    This exists because of a real incident class: the master sends
+    partial-update commands like ``{"action": "drop_user", ...}`` through
+    the same endpoint, and the old handler wrote *whatever* it received
+    straight over ``config.json`` and restarted the service — taking the
+    whole node down for every user on it. Actions are dispatched properly
+    now, but this stays as defence in depth: a full sync must at least
+    look like an Xray/Sing-box config.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return False
+    return any(key in payload for key in ("inbounds", "outbounds", "log", "route", "routing"))
+
+
+def load_config(path: str) -> dict:
+    """Read the current on-disk config. Returns {} when absent/unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Could not read existing config at %s: %s", path, exc)
+        return {}
+
+
+def atomic_write_config(path: str, config: dict) -> None:
+    """
+    Write `config` to `path` atomically (temp file in the same directory,
+    then `os.replace`). A crash or full disk mid-write must never leave a
+    truncated config.json behind — the service would fail to start and the
+    node would be down with no easy remote recovery.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".mtgroup-cfg-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _iter_user_lists(config: dict):
+    """
+    Yield every per-inbound user/client list, across both config dialects.
+
+    Xray:     inbounds[].settings.clients[]
+    Sing-box: inbounds[].users[]
+    """
+    for inbound in config.get("inbounds", []) or []:
+        if not isinstance(inbound, dict):
+            continue
+        clients = (inbound.get("settings") or {}).get("clients")
+        if isinstance(clients, list):
+            yield inbound["settings"], "clients", clients
+        users = inbound.get("users")
+        if isinstance(users, list):
+            yield inbound, "users", users
+
+
+# Identity fields a user entry may be keyed by, across both dialects.
+# The master currently sends a *username* in the `user_uuid` field (see
+# accounting._drop_user_from_nodes), so match broadly rather than assuming
+# the value is a UUID.
+_USER_IDENTITY_FIELDS = ("id", "uuid", "email", "name", "username")
+
+
+def drop_user_from_config(config: dict, identifier: str) -> int:
+    """Remove a user from every inbound. Returns how many entries were removed."""
+    removed = 0
+    for container, key, entries in _iter_user_lists(config):
+        kept = [
+            e for e in entries
+            if not (
+                isinstance(e, dict)
+                and any(str(e.get(f, "")) == identifier for f in _USER_IDENTITY_FIELDS)
+            )
+        ]
+        removed += len(entries) - len(kept)
+        container[key] = kept
+    return removed
+
+
+def set_port_in_config(config: dict, new_port: int) -> int:
+    """Repoint every inbound at `new_port`. Returns how many were changed."""
+    changed = 0
+    for inbound in config.get("inbounds", []) or []:
+        if not isinstance(inbound, dict):
+            continue
+        for port_key in ("port", "listen_port"):
+            if port_key in inbound and inbound[port_key] != new_port:
+                inbound[port_key] = new_port
+                changed += 1
+    return changed
 
 
 async def restart_service(service_name: str):
@@ -91,33 +235,88 @@ async def sync_handler(request: web.Request) -> web.Response:
             
         config_type = data.get("config_type", "")
         payload = data.get("payload", {})
-        
-        # Determine path and service based on config type
-        if "singbox" in config_type.lower() or "sing-box" in config_type.lower():
-            target_file = "/etc/sing-box/config.json"
-            service = "sing-box"
-        elif "xray" in config_type.lower() or "vless" in config_type.lower():
-            target_file = "/usr/local/etc/xray/config.json"
-            service = "xray"
-        else:
-            logger.warning(f"Unknown config_type: {config_type}. Defaulting to xray.")
-            target_file = "/usr/local/etc/xray/config.json"
-            service = "xray"
-            
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(target_file), exist_ok=True)
-        
-        # Write config to disk
-        with open(target_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-            
-        logger.info(f"Successfully wrote {config_type} config to {target_file}")
-        
-        # Async restart service
-        asyncio.create_task(restart_service(service))
-        
-        return web.json_response({"status": "synced"})
-        
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "payload must be an object"}, status=400)
+
+        target_file, service = resolve_target(config_type)
+
+        # ── Action dispatch ────────────────────────────────────────────
+        # The master multiplexes several command types over this one
+        # endpoint. `action` is carried inside `payload` (see
+        # accounting._drop_user_from_nodes / port_hopper._hopping_loop);
+        # accepted at the top level too for forward compatibility.
+        # A full config push has no action at all.
+        action = data.get("action") or payload.get("action") or "sync"
+
+        if action == "sync":
+            if not looks_like_full_config(payload):
+                # Refuse rather than clobber a working config with a blob
+                # that isn't one. Returning 400 makes the master's retry
+                # queue surface it instead of silently bricking the node.
+                logger.error(
+                    "Refusing full sync for %s: payload does not look like a "
+                    "proxy config (keys=%s). Node config left untouched.",
+                    config_type, sorted(payload)[:10],
+                )
+                return web.json_response(
+                    {"error": "payload does not look like a full proxy config"},
+                    status=400,
+                )
+            atomic_write_config(target_file, payload)
+            logger.info("Wrote full %s config to %s", config_type, target_file)
+            asyncio.create_task(restart_service(service))
+            return web.json_response({"status": "synced"})
+
+        if action == "drop_user":
+            identifier = str(payload.get("user_uuid") or payload.get("username") or "")
+            if not identifier:
+                return web.json_response({"error": "drop_user requires user_uuid"}, status=400)
+
+            config = load_config(target_file)
+            if not config:
+                logger.warning("drop_user: no existing config at %s — nothing to do.", target_file)
+                return web.json_response({"status": "noop", "reason": "no config on disk"})
+
+            removed = drop_user_from_config(config, identifier)
+            if removed == 0:
+                # Not an error: the user may already be gone, or was never
+                # provisioned here. Do not rewrite or restart for nothing.
+                logger.info("drop_user: %s not present in %s — no change.", identifier, target_file)
+                return web.json_response({"status": "noop", "removed": 0})
+
+            atomic_write_config(target_file, config)
+            logger.info("drop_user: removed %d entr(ies) for %s from %s", removed, identifier, target_file)
+            asyncio.create_task(restart_service(service))
+            return web.json_response({"status": "applied", "action": action, "removed": removed})
+
+        if action == "update_port":
+            raw_port = payload.get("new_port")
+            try:
+                new_port = int(raw_port)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "update_port requires an integer new_port"}, status=400)
+            if not (1 <= new_port <= 65535):
+                return web.json_response({"error": f"new_port {new_port} out of range"}, status=400)
+
+            config = load_config(target_file)
+            if not config:
+                logger.warning("update_port: no existing config at %s — nothing to do.", target_file)
+                return web.json_response({"status": "noop", "reason": "no config on disk"})
+
+            changed = set_port_in_config(config, new_port)
+            if changed == 0:
+                logger.info("update_port: %s already on port %d — no change.", target_file, new_port)
+                return web.json_response({"status": "noop", "changed": 0})
+
+            atomic_write_config(target_file, config)
+            logger.info("update_port: repointed %d inbound(s) to %d in %s", changed, new_port, target_file)
+            asyncio.create_task(restart_service(service))
+            return web.json_response({"status": "applied", "action": action, "changed": changed})
+
+        # Unknown action: never fall through to writing the config.
+        logger.error("Rejecting unknown action %r — node config left untouched.", action)
+        return web.json_response({"error": f"unknown action: {action}"}, status=400)
+
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON"}, status=400)
     except Exception as e:
@@ -206,4 +405,4 @@ if __name__ == "__main__":
     app = create_app()
     # SSL context can be added here if needed, but orchestrator uses verify=False
     # so we can run behind a local reverse proxy or expose directly over HTTP/HTTPS
-    web.run_app(app, host="0.0.0.0", port=PORT, access_log=logger)
+    web.run_app(app, host="0.0.0.0", port=PORT, access_log=logger)  # nosec B104 - node daemon must be reachable by the master panel over the network

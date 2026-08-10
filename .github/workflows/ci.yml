@@ -38,7 +38,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check backend/ telegram_bot/ --ignore E501
+          ruff check backend/ telegram_bot/ agent/ --ignore E501
 
       - name: Type check with mypy
         run: |
@@ -56,6 +56,16 @@ jobs:
       - name: Run Telegram bot tests
         run: |
           pytest telegram_bot/tests_bot.py -v --asyncio-mode=auto --tb=short
+
+      - name: Run node agent tests
+        # agent/ is the remote node-side deployable (node_daemon +
+        # mesh_router), separate from the master panel in backend/. Its
+        # tests existed but were never run by CI — test_mesh_router.py had
+        # been dead weight since it was written. Added when the node
+        # daemon's command dispatcher was fixed, since that code decides
+        # whether a live node keeps its config or gets wiped.
+        run: |
+          pytest agent/tests/ -v --asyncio-mode=auto --tb=short
 
       - name: Test coverage report
         # Blocking (no continue-on-error): coverage on backend/ (excluding
@@ -126,7 +136,7 @@ jobs:
         # fixed or given the same nosec-with-reason treatment, not
         # silently reintroduced by flipping this back to non-blocking.
         run: |
-          bandit -r backend/ telegram_bot/ -ll --skip B101
+          bandit -r backend/ telegram_bot/ agent/ -ll --skip B101
 
       - name: Check for vulnerable dependencies
         # Non-blocking: `safety check` is deprecated upstream in favour of
