@@ -14,10 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import asyncio
+
 from backend.app.api.auth import get_db, require_admin
 from backend.app.core.logging_config import audit_logger
 from backend.app.models import BannedIP, Node, SystemConfig, User
 from backend.app.core.crypto_quantum import hash_for_lookup
+from backend.app.orchestrator import orchestrator
 from backend.app.schemas import (
     BannedIPCreate,
     BannedIPResponse,
@@ -202,7 +205,12 @@ async def ban_ip(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> BannedIPResponse:
-    """Manually ban an IP address."""
+    """Manually ban an IP address.
+
+    Writes the audit-visible `BannedIP` row *and* applies real enforcement
+    (XDP blacklist, or the app-level ban set when eBPF is disabled) via
+    `orchestrator.apply_ip_ban()`. Previously this endpoint only wrote the
+    DB row — the IP was never actually blocked."""
     ip_h = hash_for_lookup(body.ip_address)
     existing = await db.execute(
         select(BannedIP).where(BannedIP.ip_hash == ip_h)
@@ -220,6 +228,11 @@ async def ban_ip(
     db.add(ban)
     await db.commit()
     await db.refresh(ban)
+
+    await orchestrator.apply_ip_ban(body.ip_address)
+    ttl_seconds = body.duration_hours * 3600
+    if ttl_seconds > 0:
+        asyncio.create_task(orchestrator._remove_ban_after_ttl(body.ip_address, ttl_seconds))
 
     audit_logger.log_ban(body.ip_address, body.reason, body.duration_hours)
 
@@ -243,6 +256,8 @@ async def unban_ip(
 
     await db.delete(ban)
     await db.commit()
+
+    await orchestrator.lift_ip_ban(ip_address)
 
     audit_logger.log_admin_action(
         admin_username=admin.username,

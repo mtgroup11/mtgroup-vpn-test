@@ -46,12 +46,15 @@ class Watchdog:
         
         success = True
         
-        # 1. Restore iptables
+        # 1. Restore iptables (list-argv, no shell — IPTABLES_BAK is a fixed
+        # module constant, not attacker-influenced, but avoiding shell=True
+        # is still the safer default for any subprocess call).
         if os.path.exists(IPTABLES_BAK):
             try:
-                subprocess.run(f"iptables-restore < {IPTABLES_BAK}", shell=True, check=True)
+                with open(IPTABLES_BAK, "rb") as bak:
+                    subprocess.run(["iptables-restore"], stdin=bak, check=True)
                 logging.info("iptables restored successfully.")
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, OSError) as e:
                 logging.error(f"Failed to restore iptables: {e}")
                 success = False
         else:
@@ -61,7 +64,7 @@ class Watchdog:
         # 2. Restore Xray config
         if os.path.exists(XRAY_BAK):
             try:
-                subprocess.run(f"cp {XRAY_BAK} {XRAY_TARGET}", shell=True, check=True)
+                subprocess.run(["cp", XRAY_BAK, XRAY_TARGET], check=True)
                 logging.info("Xray config restored successfully.")
             except subprocess.CalledProcessError as e:
                 logging.error(f"Failed to restore Xray config: {e}")

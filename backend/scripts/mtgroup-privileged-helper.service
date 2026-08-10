@@ -1,0 +1,26 @@
+[Unit]
+Description=MTGroup VPN Privileged Helper (iptables/nft/systemctl allowlisted daemon)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m backend.app.privileged_helper_daemon
+WorkingDirectory=/opt/mtgroup
+Restart=always
+RestartSec=5
+User=root
+# Must run as root to manage iptables/nftables/systemctl. The FastAPI
+# backend (mtgroup-backend.service) should run as an unprivileged user
+# (e.g. `mtgroup`) and talk to this daemon only via the Unix socket at
+# MTG_PRIVILEGED_HELPER_SOCKET — it should NOT have NET_ADMIN/SYS_ADMIN
+# for firewall/service management once eBPF load/attach is also moved
+# behind this helper (tracked as follow-up work; XDP compile/attach is
+# still done in-process by the backend today, see docker-compose.yml).
+Environment=MTG_PRIVILEGED_HELPER_SOCKET=/run/mtgroup/helper.sock
+Environment=MTG_PANEL_USER=mtgroup
+Environment=MTG_PANEL_GROUP=mtgroup
+RuntimeDirectory=mtgroup
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

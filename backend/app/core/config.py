@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     EBPF_INTERFACE: str = "eth0"
     NFTABLES_ENABLED: bool = False
 
+    # ── Stealth Middleware ─────────────────────────────────────────────
+    # Header value clients must send (X-Stealth-Token) to see the real API
+    # instead of a 404. No default in production — must be set via env.
+    STEALTH_TOKEN: str = ""
+
+    # ── Privileged Helper Daemon ─────────────────────────────────────────
+    # Unix socket the root-owned helper listens on. The backend process
+    # talks to it instead of calling iptables/nft/systemctl/eBPF directly,
+    # so the API process itself never needs NET_ADMIN/SYS_ADMIN.
+    PRIVILEGED_HELPER_SOCKET: str = "/run/mtgroup/helper.sock"
+
     # ── Logging ──────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "mtgroup.log"

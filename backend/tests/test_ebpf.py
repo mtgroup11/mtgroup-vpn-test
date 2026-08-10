@@ -144,3 +144,18 @@ class TestNFTablesManager:
         ruleset = await self.nft.get_ruleset()
         # In dry-run mode, output is empty
         assert ruleset == ""
+
+    @pytest.mark.asyncio
+    async def test_ban_ip_rejects_shell_injection_attempt(self):
+        """Regression test: `ban_ip` used to embed `ip` directly into a
+        shell command string. Any non-address input must now be rejected
+        by ipaddress.ip_address() validation before a command is ever
+        built — with or without a live privileged helper socket."""
+        await self.nft.initialize()
+        malicious = "1.2.3.4; touch /tmp/pwned"
+        assert await self.nft.ban_ip(malicious) is False
+
+    @pytest.mark.asyncio
+    async def test_unban_ip_rejects_invalid_input(self):
+        await self.nft.initialize()
+        assert await self.nft.unban_ip("not-an-ip") is False

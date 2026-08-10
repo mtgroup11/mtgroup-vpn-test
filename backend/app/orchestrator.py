@@ -245,6 +245,29 @@ class NodeOrchestrator:
             logger.warning("Health check failed for Node %s: %s", node.name, e)
             await self._mark_node_offline(node.id)
 
+    async def apply_ip_ban(self, ip_address: str) -> None:
+        """Applies enforcement only (XDP blacklist, or the app-level ban set
+        when eBPF is disabled) — does NOT touch the database. Callers that
+        need a persistent record (audit trail, admin-visible ban list, TTL)
+        manage their own `BannedIP` row; this is the shared low-level
+        primitive both the AI fast-track path and the admin ban API use."""
+        from backend.app.core.config import settings
+        if getattr(settings, 'EBPF_ENABLED', False):
+            from backend.app.api.metrics import xdp_loader
+            xdp_loader.blacklist_ip(ip_address)
+        else:
+            self._app_banned_ips.add(ip_address)
+            logger.info("eBPF Disabled: App-level blacklist applied for %s.", ip_address)
+
+    async def lift_ip_ban(self, ip_address: str) -> None:
+        """Reverses `apply_ip_ban`. Does not touch the database."""
+        from backend.app.core.config import settings
+        if getattr(settings, 'EBPF_ENABLED', False):
+            from backend.app.api.metrics import xdp_loader
+            xdp_loader.unblacklist_ip(ip_address)
+        else:
+            self._app_banned_ips.discard(ip_address)
+
     async def handle_security_alert(self, ip_address: str, reason: str):
         """
         AI tarafından tetiklenen geçici (Fast-Track Defense) uyarısını işler.
@@ -253,14 +276,8 @@ class NodeOrchestrator:
         """
         logger.warning("SecurityAlert from AI for IP %s: %s", ip_address, reason)
         try:
-            from backend.app.core.config import settings
-            if getattr(settings, 'EBPF_ENABLED', False):
-                from backend.app.api.metrics import xdp_loader
-                xdp_loader.blacklist_ip(ip_address)
-            else:
-                self._app_banned_ips.add(ip_address)
-                logger.info("eBPF Disabled: App-level blacklist applied for %s.", ip_address)
-            
+            await self.apply_ip_ban(ip_address)
+
             # Veritabanına asenkron kaydet
             if self._db_session_factory:
                 from backend.app.models import BannedIP, BanReason
@@ -289,12 +306,7 @@ class NodeOrchestrator:
     async def _remove_ban_after_ttl(self, ip_address: str, ttl: int):
         await asyncio.sleep(ttl)
         try:
-            from backend.app.core.config import settings
-            if getattr(settings, 'EBPF_ENABLED', False):
-                from backend.app.api.metrics import xdp_loader
-                xdp_loader.unblacklist_ip(ip_address)
-            else:
-                self._app_banned_ips.discard(ip_address)
+            await self.lift_ip_ban(ip_address)
             logger.info("Temporary ban lifted for %s after %ds TTL.", ip_address, ttl)
         except Exception as e:
             logger.error("Failed to lift temporary ban for %s: %s", ip_address, e)

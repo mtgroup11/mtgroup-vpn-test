@@ -1,13 +1,26 @@
+import ipaddress
 import logging
 import asyncio
+import shlex
 import subprocess
 from typing import List
+
+from backend.app.core.privileged_helper import PrivilegedHelperError, helper_request
 
 logger = logging.getLogger("mtgroup.ebpf.nftables")
 
 class NFTablesManager:
     """
     Manages nftables rules for firewalling, redirection, rate-limiting, and banning.
+
+    NOTE: table/chain setup and port-redirect/rate-limit rules below are
+    built from fixed, operator-controlled config (not request-derived
+    strings), so they are executed in-process rather than via the
+    privileged helper daemon. `ban_ip`/`unban_ip` are the exception — they
+    embed a caller-supplied IP address, so they always go through the
+    daemon's validated `firewall.ban_ip`/`firewall.unban_ip` operations
+    (see below). This method still avoids a shell (`create_subprocess_exec`
+    with `shlex.split`, not `create_subprocess_shell`) as defense in depth.
     """
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
@@ -19,9 +32,9 @@ class NFTablesManager:
             logger.info(f"[DRY RUN] {command}")
             return True
         try:
-            # In a real system, run subprocess
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            argv = shlex.split(command)
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -52,15 +65,60 @@ class NFTablesManager:
         return success
 
     async def ban_ip(self, ip: str, duration_hours: int = 24) -> bool:
-        """Bans an IP address by adding a drop rule."""
+        """Bans an IP address by adding it to the privileged helper's
+        nftables ban set.
+
+        `ip` is validated with `ipaddress.ip_address()` *before* anything
+        else happens — this used to be embedded directly into a shell
+        command string (`create_subprocess_shell`), which was a shell
+        injection vector. The actual `nft` invocation now happens in the
+        root-owned privileged helper daemon, as a fixed argv list, never
+        a shell string.
+        """
         if not self._initialized:
             logger.warning("nftables manager not initialized.")
             return False
-        command = f"nft add rule inet mtgroup banned_ips ip saddr {ip} counter drop comment \"auto-ban\""
-        success = await self._run_nft(command)
-        if success:
+        try:
+            ipaddress.ip_address(ip.strip())
+        except ValueError:
+            logger.error(f"Refusing to ban invalid IP address: {ip!r}")
+            return False
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] ban_ip({ip})")
+            return True
+
+        try:
+            resp = await helper_request("firewall.ban_ip", {"ip": ip.strip()})
+        except PrivilegedHelperError as e:
+            logger.error(f"Failed to reach privileged helper to ban {ip}: {e}")
+            return False
+        if resp.ok:
             logger.info(f"Banned IP {ip} for {duration_hours}h via nftables")
-        return success
+        else:
+            logger.error(f"Privileged helper rejected ban for {ip}: {resp.message}")
+        return resp.ok
+
+    async def unban_ip(self, ip: str) -> bool:
+        """Removes an IP from the privileged helper's nftables ban set."""
+        try:
+            ipaddress.ip_address(ip.strip())
+        except ValueError:
+            logger.error(f"Refusing to unban invalid IP address: {ip!r}")
+            return False
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] unban_ip({ip})")
+            return True
+
+        try:
+            resp = await helper_request("firewall.unban_ip", {"ip": ip.strip()})
+        except PrivilegedHelperError as e:
+            logger.error(f"Failed to reach privileged helper to unban {ip}: {e}")
+            return False
+        if not resp.ok:
+            logger.error(f"Privileged helper rejected unban for {ip}: {resp.message}")
+        return resp.ok
 
     async def setup_port_redirect(self, from_port: int, to_port: int) -> bool:
         """Sets up a single port redirection to a target port."""

@@ -19,20 +19,22 @@ def snapshot_and_arm():
     """
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     
-    # 1. Snapshot iptables
+    # 1. Snapshot iptables (list-argv, no shell — output redirected in
+    # Python rather than via a shell `>` operator)
     try:
-        subprocess.run(f"iptables-save > {SNAPSHOT_DIR}/iptables.bak", shell=True, check=True)
+        with open(os.path.join(SNAPSHOT_DIR, "iptables.bak"), "wb") as bak:
+            subprocess.run(["iptables-save"], stdout=bak, check=True)
         logger.info("Saved iptables snapshot.")
-    except Exception as e:
+    except (OSError, subprocess.CalledProcessError) as e:
         logger.warning(f"Failed to snapshot iptables: {e}")
-        
+
     # 2. Snapshot Xray
     xray_conf = "/usr/local/etc/xray/config.json"
     if os.path.exists(xray_conf):
         try:
-            subprocess.run(f"cp {xray_conf} {SNAPSHOT_DIR}/xray_config.json.bak", shell=True, check=True)
+            subprocess.run(["cp", xray_conf, os.path.join(SNAPSHOT_DIR, "xray_config.json.bak")], check=True)
             logger.info("Saved Xray config snapshot.")
-        except Exception as e:
+        except (OSError, subprocess.CalledProcessError) as e:
             logger.warning(f"Failed to snapshot Xray config: {e}")
             
     # 3. Arm watchdog with authentication

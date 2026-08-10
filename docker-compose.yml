@@ -1,33 +1,64 @@
 version: '3.8'
 
 services:
+  # ── Privileged Helper ──────────────────────────────────────────────────
+  # Root-owned daemon that owns iptables/nft/systemctl. vpn-backend talks to
+  # it over a Unix socket (shared volume below) instead of calling these
+  # tools itself — see backend/app/privileged_helper_daemon.py.
+  vpn-privileged-helper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mtgroup-privileged-helper
+    restart: unless-stopped
+    command: ["python", "-m", "backend.app.privileged_helper_daemon"]
+    network_mode: "host"
+    volumes:
+      - mtgroup-helper-sock:/run/mtgroup
+    environment:
+      - MTG_PRIVILEGED_HELPER_SOCKET=/run/mtgroup/helper.sock
+      - MTG_PANEL_USER=mtgroup
+      - MTG_PANEL_GROUP=mtgroup
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
   vpn-backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: mtgroup-vpn-backend
     restart: unless-stopped
-    
-    # ── CRITICAL: eBPF / XDP Network Requirements ──
-    # The application compiles and loads C code into the kernel for DPI evasion
-    # and deep packet inspection. It uses cap_add instead of privileged mode.
+    depends_on:
+      - vpn-privileged-helper
+
+    # ── eBPF / XDP Network Requirements ──
+    # The application still compiles and loads XDP bytecode itself (see
+    # backend/app/main.py lifespan) — CAP_SYS_ADMIN/CAP_NET_ADMIN here are
+    # for that BPF load/attach only. iptables/nft/systemctl calls no longer
+    # happen in this container; they go through vpn-privileged-helper.
+    # Moving the eBPF load/attach itself behind the helper (via pinned BPF
+    # maps) is tracked as follow-up work, not done in this pass.
     network_mode: "host"
-    
+
     volumes:
       # Mount kernel headers and modules for BPF compilation
       - /lib/modules:/lib/modules:ro
       - /usr/src:/usr/src:ro
-      
+
       # Persist SQLite DB and logs
       - ./mtgroup.db:/app/mtgroup.db
       - ./mtgroup.log:/app/mtgroup.log
       - ./audit.log:/app/audit.log
-    
+
+      # Shared socket to reach the privileged helper
+      - mtgroup-helper-sock:/run/mtgroup
+
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./mtgroup.db
       - PYTHONIOENCODING=utf-8
-    
-    # Cap-add for networking (redundant due to privileged: true, but good practice)
+      - PRIVILEGED_HELPER_SOCKET=/run/mtgroup/helper.sock
+
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -45,3 +76,6 @@ services:
       - NODE_ENV=production
     depends_on:
       - vpn-backend
+
+volumes:
+  mtgroup-helper-sock:

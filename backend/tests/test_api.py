@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from backend.app.core.config import settings
 from backend.app.core.security import hash_password
 from backend.app.main import app
 from backend.app.models import (
@@ -121,7 +122,7 @@ async def client(db_engine):
     async with AsyncClient(
         transport=transport,
         base_url="http://test",
-        headers={"X-Stealth-Token": "SUPER_SECRET_NOC_TOKEN_2026"},
+        headers={"X-Stealth-Token": settings.STEALTH_TOKEN or "SUPER_SECRET_NOC_TOKEN_2026"},
         follow_redirects=True
     ) as ac:
         yield ac

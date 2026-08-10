@@ -1,11 +1,11 @@
 import json
 import logging
-import subprocess
 import base64
 from typing import Dict, Any, List
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization
 from backend.app.core.watchdog_client import snapshot_and_arm
+from backend.app.core.privileged_helper import PrivilegedHelperError, helper_request
 
 logger = logging.getLogger("mtgroup.proxy_manager")
 
@@ -86,22 +86,28 @@ class ProxyManager:
         }
         return config
 
-    def deploy_config(self, node_id: str, config: Dict[str, Any], filepath: str = "/etc/xray/config.json"):
+    async def deploy_config(self, node_id: str, config: Dict[str, Any], filepath: str = "/etc/xray/config.json"):
         """
-        Writes the configuration to disk and restarts/reloads the Xray service.
+        Writes the configuration to disk and restarts the Xray service.
+        The restart goes through the privileged helper daemon — this
+        process never calls `systemctl` itself.
         """
         try:
             # Snapshot and arm watchdog before applying config
             snapshot_and_arm()
-            
+
             with open(filepath, 'w') as f:
                 json.dump(config, f, indent=4)
             logger.info(f"Deployed new Xray config for Node {node_id} to {filepath}")
-            
-            # Restart Xray service (systemd or direct depending on setup)
-            subprocess.run(["systemctl", "restart", "xray"], check=True)
+
+            resp = await helper_request("service.restart", {"service": "xray"})
+            if not resp.ok:
+                raise RuntimeError(f"privileged helper refused xray restart: {resp.message}")
             logger.info(f"Xray service restarted for Node {node_id}")
-            
+
+        except PrivilegedHelperError as e:
+            logger.error(f"Could not reach privileged helper to restart Xray for Node {node_id}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to deploy Xray config for Node {node_id}: {e}")
             raise

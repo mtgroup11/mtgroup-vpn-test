@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import logging
 import asyncio
+import hmac
 import os
 
 from backend.app.core.killswitch import killswitch
@@ -11,8 +13,9 @@ from backend.app.core.honeypot import honeypot
 from backend.app.generators.port_hopper import AsyncPortHoppingEngine
 from backend.app.core.ai_detector import AnomalyPredictor
 from backend.app.orchestrator import orchestrator
-from backend.app.models import Base
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from backend.app.models import create_db_engine, create_session_factory, init_db
+from backend.app.api.auth import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 
 try:
     from bcc import BPF  # type: ignore
@@ -23,10 +26,11 @@ except ImportError:
 bpf_instance = None
 hopper_engine = None
 ai_engine = None
+db_session_factory = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bpf_instance, hopper_engine, ai_engine
+    global bpf_instance, hopper_engine, ai_engine, db_session_factory
     logging.info("🚀 XDP-Spectre Central Orchestrator Booting...")
     
     if not settings.DEBUG:
@@ -34,6 +38,8 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("CRITICAL: DB_ENCRYPTION_KEY is empty or default in PRODUCTION (DEBUG=False). Set a secure key to start.")
         if not settings.ADMIN_PASSWORD or settings.ADMIN_PASSWORD == "MTGroup@2024!Secure":
             raise RuntimeError("CRITICAL: ADMIN_PASSWORD is empty or default in PRODUCTION (DEBUG=False). Set a secure password to start.")
+        if not settings.STEALTH_TOKEN:
+            raise RuntimeError("CRITICAL: STEALTH_TOKEN is empty in PRODUCTION (DEBUG=False). Set a secure token to start.")
     
     if HAS_BCC and getattr(settings, 'EBPF_ENABLED', False):
         try:
@@ -60,12 +66,21 @@ async def lifespan(app: FastAPI):
         logging.warning("BCC not installed but EBPF_ENABLED is true. XDP-Spectre running in simulation mode.")
 
     # Initialize Database
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = create_db_engine(settings.DATABASE_URL)
+    await init_db(engine)
     logging.info("SQLite Async Database initialized.")
-    
-    db_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    db_session_factory = create_session_factory(engine)
+
+    # Wire up the real DB session dependency. `get_db` in api/auth.py is a
+    # placeholder that raises NotImplementedError by design — every
+    # DB-backed endpoint depends on it, so without this override the
+    # production app 500s on first DB access.
+    async def _get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with db_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _get_db
 
     # Initialize Engines
     hopper_engine = AsyncPortHoppingEngine(db_session_factory=db_session_factory)
@@ -134,9 +149,9 @@ async def stealth_middleware(request: Request, call_next):
     if orchestrator.is_app_banned(request.client.host):
         return JSONResponse(status_code=403, content={"detail": "Forbidden (App-Level Ban)"})
         
-    # Gelen isteklerde 'X-Stealth-Token' header kontrolü
-    token = request.headers.get("X-Stealth-Token")
-    if token != "SUPER_SECRET_NOC_TOKEN_2026": # In real app, load from config
+    # Gelen isteklerde 'X-Stealth-Token' header kontrolü (config'den, sabit değil)
+    token = request.headers.get("X-Stealth-Token") or ""
+    if not settings.STEALTH_TOKEN or not hmac.compare_digest(token, settings.STEALTH_TOKEN):
         # Sıradan projelere ve tarayıcılara kendini gizle
         logging.warning(f"Unauthorized access attempt from {request.client.host}")
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
@@ -144,12 +159,12 @@ async def stealth_middleware(request: Request, call_next):
 
 @app.post("/api/v1/system/killswitch/trigger")
 async def api_trigger_killswitch():
-    killswitch.trigger_lockdown()
+    await killswitch.trigger_lockdown()
     return {"status": "lockdown_active", "message": "All non-VPN traffic is now DROPPED at XDP layer."}
 
 @app.post("/api/v1/system/killswitch/release")
 async def api_release_killswitch():
-    killswitch.release_lockdown()
+    await killswitch.release_lockdown()
     return {"status": "lockdown_released", "message": "Traffic flowing normally."}
 
 @app.post("/api/v1/system/porthop/trigger")
