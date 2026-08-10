@@ -11,6 +11,10 @@ pydantic-settings>=2.5.0
 # ── Database ──────────────────────────────────────────────────
 sqlalchemy[asyncio]>=2.0.35
 aiosqlite>=0.20.0
+# Schema migrations. init_db() runs `upgrade head` at startup — see
+# backend/app/models.py. Plain create_all() cannot add columns to an
+# already-deployed database, so this is required, not optional.
+alembic>=1.13.0
 
 # ── Security & Cryptography ──────────────────────────────────
 bcrypt>=4.2.0

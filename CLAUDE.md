@@ -89,6 +89,23 @@ The daemon now dispatches on `action` (`sync` / `drop_user` / `update_port`; abs
 - `killswitch` (`core/killswitch.py`) — drops all non-VPN traffic at the XDP layer on trigger, exposed via `/api/v1/system/killswitch/trigger|release`.
 All three of eBPF-off, BCC-not-installed, and BCC-import-failure are handled as graceful degradation paths, not hard failures — check `HAS_BCC` and `settings.EBPF_ENABLED` together when touching this code.
 
+### Database migrations (Alembic) — required for ANY model change
+`init_db()` runs `alembic upgrade head` at startup; it no longer calls `Base.metadata.create_all()`. That matters because `create_all` only ever *creates missing tables* — it silently ignores a new column on a table that already exists, so a model change would work perfectly on your fresh local DB and then crash an existing deployment with `no such column`.
+
+**After editing anything in `models.py`, generate a migration in the same change:**
+```bash
+alembic revision --autogenerate -m "what changed"   # review the generated file before committing
+alembic upgrade head                                 # apply locally
+```
+`backend/tests/test_migrations.py` fails the build if models and migrations diverge, so forgetting this is caught by CI rather than in production.
+
+Details worth knowing:
+- **`alembic.ini`'s `sqlalchemy.url` is deliberately blank.** `migrations/env.py` takes the URL from `settings.DATABASE_URL`, so there's one source of truth. An explicitly-passed URL still wins (tests target a temp DB that way).
+- **Databases created before migrations existed are adopted automatically** — if the tables are there but `alembic_version` isn't, startup stamps the initial revision and then upgrades. No manual `alembic stamp` step when deploying.
+- **`EncryptedType` columns render as `sa.Text()` in migrations** (`render_item` in `env.py`). At the database level they genuinely are TEXT; the encryption is applied in Python. This keeps migration history from importing application code.
+- **`render_as_batch=True`** is on because SQLite can't `ALTER` most column properties in place.
+- Six columns had both a column-level `unique=True` *and* a named `UniqueConstraint` in `__table_args__`, which emitted duplicate DDL and made `alembic check` permanently dirty. The redundant `unique=True` was removed; the named constraints still enforce uniqueness (there's a test).
+
 ### Config and required production secrets
 `backend/app/core/config.py`'s `Settings` (pydantic-settings, loads from `.env`) has safe defaults for local dev, but `lifespan()` **hard-fails at startup** when `DEBUG=False` and any of `DB_ENCRYPTION_KEY`, `ADMIN_PASSWORD`, or `STEALTH_TOKEN` are empty or still the shipped default — this is intentional so the app can't accidentally go to production insecure. When writing tests or local scripts, either set `DEBUG=True` or set real values for these three.
 

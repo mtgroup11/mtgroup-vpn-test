@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
 from backend.app.core.config import settings
 from backend.app.core.security import hash_password
@@ -21,7 +22,6 @@ from backend.app.models import (
     UserRole,
     create_db_engine,
     create_session_factory,
-    init_db,
 )
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_mtgroup.db"
@@ -29,12 +29,31 @@ TEST_DB_URL = "sqlite+aiosqlite:///./test_mtgroup.db"
 
 @pytest_asyncio.fixture(scope="function")
 async def db_engine():
-    """Create a fresh test database for each test."""
+    """
+    Create a fresh test database for each test.
+
+    Builds the schema straight from `Base.metadata` rather than calling
+    `init_db()` (which runs the full Alembic migration chain). Running
+    every migration for every one of ~500 DB-backed tests took the suite
+    from ~2.5 to ~5.5 minutes for no added signal: the two are provably
+    equivalent, and `backend/tests/test_migrations.py` is what proves it
+    — it fails the build if the migrations and `Base.metadata` ever
+    describe different schemas, and it separately exercises the real
+    `init_db()` path on fresh, legacy and already-migrated databases.
+
+    `alembic_version` is dropped alongside the model tables. It isn't
+    created here, but a previously-interrupted run can leave one behind,
+    and a database stamped at head with no tables would make every
+    subsequent test fail with "no such table".
+    """
     engine = create_db_engine(TEST_DB_URL)
-    await init_db(engine)
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
     await engine.dispose()
 
 

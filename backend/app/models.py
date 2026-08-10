@@ -22,8 +22,10 @@ All models are fully compatible with async SQLAlchemy 2.0+
 from __future__ import annotations
 
 import enum
+import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import (
@@ -39,6 +41,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -162,7 +165,7 @@ class User(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole), nullable=False, default=UserRole.USER
@@ -327,7 +330,7 @@ class Agent(Base):
 
     # Human-readable agent code (e.g. "AG-7291")
     agent_code: Mapped[str] = mapped_column(
-        String(32), nullable=False, unique=True,
+        String(32), nullable=False,
         default=lambda: f"AG-{uuid.uuid4().hex[:8].upper()}",
     )
 
@@ -457,7 +460,7 @@ class Node(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     address: Mapped[str] = mapped_column(String(256), nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False, default=443)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -573,7 +576,6 @@ class Subscription(Base):
     token: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
-        unique=True,
         default=lambda: uuid.uuid4().hex,
     )
 
@@ -766,7 +768,7 @@ class BannedIP(Base):
         EncryptedType(), nullable=False,
     )
     ip_hash: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True,
+        String(64), nullable=False,
     )
 
     reason: Mapped[BanReason] = mapped_column(
@@ -798,7 +800,7 @@ class SystemConfig(Base):
     __table_args__ = (UniqueConstraint("key", name="uq_system_config_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -916,7 +918,70 @@ def create_session_factory(engine):
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+def _alembic_config(database_url: str):
+    """Build an Alembic config pointed at this repo's migrations/ directory."""
+    from alembic.config import Config
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    cfg = Config(str(repo_root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(repo_root / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    return cfg
+
+
+def _run_sync_migrations(connection, database_url: str) -> None:
+    """Bring the database up to head, adopting a pre-Alembic database first.
+
+    Runs inside `connection.run_sync`, because Alembic's migration runner
+    is synchronous.
+    """
+    from alembic import command
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    cfg = _alembic_config(database_url)
+    cfg.attributes["connection"] = connection
+
+    context = MigrationContext.configure(connection)
+    current = context.get_current_revision()
+
+    if current is None:
+        # No alembic_version table. Either a brand-new database, or one
+        # created by the old `Base.metadata.create_all()` before migrations
+        # existed. Those are indistinguishable by revision alone, so look
+        # for a table the schema has always had: if it's there, the schema
+        # is already at the initial revision and must be *stamped*, not
+        # re-created (re-running the initial migration against existing
+        # tables would fail on "table already exists").
+        inspector = sa_inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        if "users" in existing_tables:
+            script = ScriptDirectory.from_config(cfg)
+            first = script.get_base()  # the revision whose down_revision is None
+            logging.getLogger("mtgroup.models").warning(
+                "Adopting a pre-Alembic database: stamping it at the initial "
+                "revision (%s) instead of re-creating existing tables.", first,
+            )
+            command.stamp(cfg, first)
+
+    command.upgrade(cfg, "head")
+
+
 async def init_db(engine):
-    """Create all tables in the database."""
+    """
+    Bring the database schema up to date.
+
+    Uses Alembic rather than `Base.metadata.create_all()`. `create_all`
+    only ever *creates missing tables* — it silently ignores new columns
+    on tables that already exist, so any model change after the first
+    deployment would appear to work locally (fresh DB) and then fail in
+    production with "no such column". Migrations are the only thing that
+    makes a schema change actually reach an existing install.
+
+    Databases created before migrations existed are adopted automatically
+    (stamped at the initial revision, then upgraded), so no manual
+    `alembic stamp` step is needed when deploying this change.
+    """
+    database_url = str(engine.url.render_as_string(hide_password=False))
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_run_sync_migrations, database_url)
