@@ -65,10 +65,10 @@ jobs:
         # measured but not currently included in the gate threshold — its
         # test suite has a pre-existing relative-import failure unrelated
         # to this gate that needs fixing separately.
-        # 80% is a safety margin below the real, currently-achieved ~82%
-        # as of 2026-08-10 (454 tests). History: 38% baseline this
+        # 82% is a safety margin below the real, currently-achieved ~84%
+        # as of 2026-08-10 (557 tests). History: 38% baseline this
         # initiative started from -> 55 -> 58 -> 62 -> 65 -> 70 -> 72 ->
-        # 75 -> 76 -> 78 -> 80 over successive sessions. The 67% -> 73%
+        # 75 -> 76 -> 78 -> 80 -> 82 over successive sessions. The 67% -> 73%
         # jump on 2026-08-10 came from a .coveragerc fix, not new tests:
         # coverage wasn't configured to follow greenlet switches (how
         # SQLAlchemy's async ORM bridges every awaited DB call), so api/*.py
@@ -80,7 +80,9 @@ jobs:
         # accounting.py 27%->91%, auto_cdn.py 0%->95%, metrics.py
         # 48%->93%, routing_engine.py 59%->90%, honeypot.py 36%->100%,
         # watchdog_client.py 30%->100%, geo_camouflage.py 33%->100%,
-        # port_hopper.py 38%->96%.
+        # port_hopper.py 38%->96%, crypto_quantum.py 76%->84%,
+        # generator_vless.py 35%->100%, generator_hysteria2.py 51%->98%,
+        # generator_tuic.py 58%->100%.
         # Three real production bugs were found purely by writing these
         # tests (not by inspection) — see git log for
         # backend/app/core/accounting.py (bulk quota-suspension UPDATE
@@ -95,7 +97,7 @@ jobs:
             --asyncio-mode=auto \
             --cov=backend \
             --cov-report=term-missing \
-            --cov-fail-under=80
+            --cov-fail-under=82
 
   security-scan:
     runs-on: ubuntu-latest
