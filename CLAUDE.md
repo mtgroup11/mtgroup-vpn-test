@@ -104,19 +104,21 @@ The bandit gate is blocking at zero findings. Anything intentional carries an in
 
 ### Known deferred decisions — engines that are NOT wired into `lifespan()`
 
-Three engines are fully implemented and well covered by tests, but nothing instantiates or starts them at boot. This is **deliberate, not an oversight or dead code** — don't delete them, and don't assume they're running when reasoning about production behaviour. Each was left dormant for a specific reason, and each needs verification before being switched on. Enabling any of them is a deployment decision: **ask the user first, present the risk, don't wire it up silently.** The wiring itself is ~5 lines per engine once they say yes.
+Two engines are fully implemented and well covered by tests, but are deliberately **not** started at boot. This is **not an oversight and not dead code** — don't delete them, and don't assume they're running when reasoning about production behaviour. Enabling either is a deployment decision the repo owner has explicitly reserved: **ask first, present the risk, don't wire it up silently.** The wiring itself is ~5 lines per engine once they say yes.
 
-**`SNIMultiplexer` (`core/routing_engine.py`)** — full SNI-routing / active-probe-deflection TCP server.
+(`SingularityAutoCDN` used to be in this list and **is now wired up and starting** — see the note at the end of this section.)
+
+**`SNIMultiplexer` (`core/routing_engine.py`)** — full SNI-routing / active-probe-deflection TCP server. *Owner is personally verifying the panel's real :443 usage before this gets enabled.*
 - *Why deferred:* it defaults to binding `0.0.0.0:443`. On a live panel that port is almost certainly already held by the API itself or by nginx, so starting it at boot could either fail the boot outright or hijack the panel's own listener.
 - *Before enabling:* confirm what actually owns :443 on the target host (`ss -lntp`); decide whether the mux fronts the API (mux on :443, API moved to a loopback port and registered as a backend via `add_backend`) or listens elsewhere; check it against `DECOY_REVERSE_PROXY_TARGET` being reachable, since unmatched SNI gets reverse-proxied there; verify `reuse_port=True` in `start()` behaves as intended on the deployment kernel.
 
-**`TrafficAccountingEngine` (`core/accounting.py`)** — quota enforcement. Its own docstring claims it is "instantiated in main.py lifespan"; it is not.
+**`TrafficAccountingEngine` (`core/accounting.py`)** — quota enforcement. Its own docstring claims it is "instantiated in main.py lifespan"; it is not. *Owner is personally sampling the real `data_used_bytes` / `data_limit_bytes` values for sanity before this gets enabled.*
 - *Why deferred:* it **mutates user rows** — it sets `is_active = False` on users and agents over quota and pushes drop commands to nodes. It has never once executed successfully in production (its bulk `UPDATE` threw on every cycle under SQLAlchemy 2.x until that was fixed), so the first real run is also the first time anyone's quota is ever enforced. Whether the existing `data_used_bytes` / `traffic_used_bytes` values are trustworthy enough to suspend accounts against is a business call.
 - *Before enabling:* audit current usage counters against real limits first (`SELECT username, data_used_bytes, data_limit_bytes FROM users WHERE data_limit_bytes > 0 AND data_used_bytes >= data_limit_bytes`) to see exactly who would be suspended on the first cycle; same for `agents`. Confirm something actually calls `ingest_traffic()` — no node-side pusher is wired today, so with no input it would enforce against stale counters only. Consider a dry-run mode (log intended suspensions without committing) for the first deployment.
 
-**`SingularityAutoCDN` (`core/auto_cdn.py`)** — Cloudflare/SNI-rotation engine.
-- *Why deferred:* **`_check_sni_health()` and `_manage_auto_cdn()` are still literal `pass` stubs** (`# To be implemented fully`). The start/stop lifecycle and the 60-second run loop work and are tested, but the loop calls two no-ops — starting it just burns a task doing nothing every 60s.
-- *Before enabling:* implement the two hooks first. There is nothing to verify or gain until then.
+**`SingularityAutoCDN` (`core/auto_cdn.py`) — NOW WIRED UP and starting unconditionally in `lifespan()`**, alongside the honeypot. It was enabled deliberately while still inert, to get the lifecycle plumbing in place ahead of the implementation.
+- **Its two hooks `_check_sni_health()` and `_manage_auto_cdn()` are still literal `pass` stubs** (`# To be implemented fully`), so the 60-second loop is a genuine no-op today. It costs a sleeping task and nothing else.
+- **If you implement those hooks, gate the engine on `settings.CDN_ENABLED` at the same time** (there is already such a flag, default `False`, plus `CDN_WORKER_URL`). Right now it starts for everyone; the moment it does real work — Cloudflare API calls, outbound SNI probing — starting unconditionally would silently give that behaviour to operators who never opted into CDN fronting on a routine upgrade. The same reminder is in a comment at the instantiation site in `main.py`.
 
 Related: the XDP stats file that `cli.py` and `telegram_bot/` read (`/run/mtgroup/xdp_stats.json`) has **no writer anywhere** — both readers degrade gracefully to zeroed stats, so those displays are permanently zero until an exporter is written.
 - The XDP stats file that `cli.py` and the Telegram bot read (`/run/mtgroup/xdp_stats.json`) has no writer yet; both readers degrade to zeroed stats.
