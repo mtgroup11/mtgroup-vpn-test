@@ -58,14 +58,21 @@ jobs:
           pytest telegram_bot/tests_bot.py -v --asyncio-mode=auto --tb=short
 
       - name: Test coverage report
+        # Blocking (no continue-on-error): coverage on backend/ (excluding
+        # cli.py — see .coveragerc — and test files themselves, which
+        # previously inflated the reported percentage by counting
+        # already-100%-covered test code as "coverage"). telegram_bot/ is
+        # measured but not currently included in the gate threshold — its
+        # test suite has a pre-existing relative-import failure unrelated
+        # to this gate that needs fixing separately.
+        # 45% is the real, currently-achieved floor as of 2026-08-10; raise
+        # this number as coverage improves, never lower it.
         run: |
-          pytest backend/tests/ telegram_bot/tests_bot.py \
+          pytest backend/tests/ \
             --asyncio-mode=auto \
             --cov=backend \
-            --cov=telegram_bot \
             --cov-report=term-missing \
-            --cov-fail-under=60
-        continue-on-error: true
+            --cov-fail-under=45
 
   security-scan:
     runs-on: ubuntu-latest
@@ -83,11 +90,26 @@ jobs:
           pip install bandit safety
 
       - name: Security scan with bandit
+        # Non-blocking (informational): 10 findings remain as of
+        # 2026-08-10 (down from 12 — this session fixed 2 real false
+        # positives via usedforsecurity=False on the SHA1/MD5 calls used
+        # for OVH signing / JA3 fingerprinting, neither a security use of
+        # the hash). The rest are a mix
+        # of intentional design (0.0.0.0 bind, verify=False on self-signed
+        # node certs) and minor items (hardcoded /tmp paths) not triaged
+        # yet — not flipping to blocking until each is explicitly
+        # accepted or fixed, so this doesn't silently block unrelated PRs.
         run: |
           bandit -r backend/ telegram_bot/ -ll --skip B101
         continue-on-error: true
 
       - name: Check for vulnerable dependencies
+        # Non-blocking: `safety check` is deprecated upstream in favour of
+        # `safety scan`, and hasn't been verified against a clean venv
+        # (only checked ad hoc against a dev machine with unrelated global
+        # packages installed, which isn't a reliable signal) — needs a
+        # proper run against a fresh `pip install -r requirements.txt`
+        # before this can be trusted as a blocking gate.
         run: |
           pip install -r requirements.txt
           safety check --full-report

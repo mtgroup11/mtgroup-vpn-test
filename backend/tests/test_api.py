@@ -96,6 +96,17 @@ async def client(db_engine):
     from backend.app.api.auth import get_db
     app.dependency_overrides[get_db] = override_get_db
 
+    # RateLimitMiddleware (registered globally in main.py) shares the same
+    # module-level `rate_limiter` singleton across every test in the
+    # session. The ASGI test transport has no real peer IP, so every
+    # request in every test collapses onto the same bucket key — without
+    # resetting it here, later tests start already-throttled by earlier
+    # ones and fail with 429s that have nothing to do with what they're
+    # actually testing.
+    from backend.app.core.security import rate_limiter
+    with rate_limiter._lock:
+        rate_limiter._buckets.clear()
+
     # Seed admin
     async with factory() as session:
         admin = User(

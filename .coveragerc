@@ -1,0 +1,15 @@
+[run]
+omit =
+    # Interactive terminal admin tool (menus, prompts, print formatting).
+    # Its value comes from being exercised by a human operator, not from
+    # unit tests — including it in the coverage denominator would mean
+    # writing thousands of lines of shallow tests around input()/print()
+    # just to move a percentage, which is the opposite of test discipline.
+    backend/app/cli.py
+    */tests/*
+    */test_*.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:

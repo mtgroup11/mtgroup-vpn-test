@@ -125,6 +125,18 @@ async def lifespan(app: FastAPI):
 # Zero-UI FastAPI Setup
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
+# Global middleware. These were defined in api/rate_limiter.py but never
+# actually registered — meaning there was no rate limiting or security
+# headers on any response except the per-endpoint checks auth.py does
+# itself. BannedIPMiddleware is intentionally NOT registered here: it
+# needs a db_session_factory that only exists once the lifespan has run,
+# and orchestrator.is_app_banned() (checked in stealth_middleware below)
+# already covers the same app-level ban set without that ordering problem.
+from backend.app.api.rate_limiter import RateLimitMiddleware, SecurityHeadersMiddleware
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
+
 # Register API Routers
 from backend.app.api.auth import router as auth_router
 from backend.app.api.users import router as users_router
