@@ -96,6 +96,61 @@ class TestPreAlembicDatabaseAdoption:
             await engine.dispose()
 
     @pytest.mark.asyncio
+    async def test_outdated_unversioned_database_is_brought_forward(self, tmp_path):
+        """
+        The case that actually happens on a real deployment: an unversioned
+        database whose schema predates a migration.
+
+        An unversioned database records nothing about which schema it
+        corresponds to, so adoption picks the stamp by inspecting what is
+        there. Stamping head here would skip the migration and leave the
+        table permanently missing; stamping the initial revision on an
+        already-current database would instead replay it and fail on
+        "table already exists". Both directions are covered — this test and
+        `test_existing_data_survives_adoption`.
+        """
+        import sqlite3
+
+        from sqlalchemy import inspect as sa_inspect
+
+        url = _url(tmp_path, "outdated.db")
+        db_path = tmp_path / "outdated.db"
+
+        # Build a current-schema database, then remove a table added by a
+        # later migration and strip the version marker, so it looks like an
+        # older unversioned install.
+        seed = create_async_engine(url)
+        try:
+            async with seed.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        finally:
+            await seed.dispose()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            # Undo *everything* the latest migration introduced, not just the
+            # table — a real pre-migration database would have none of it,
+            # and leaving the columns behind would construct a half-migrated
+            # state that no revision corresponds to.
+            conn.execute("DROP TABLE IF EXISTS wireguard_peers")
+            conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_subnet")
+            conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_server_public_key")
+            conn.execute("DROP TABLE IF EXISTS alembic_version")
+            conn.commit()
+        finally:
+            conn.close()
+
+        engine = create_async_engine(url)
+        try:
+            await init_db(engine)
+            async with engine.connect() as connection:
+                tables = await connection.run_sync(lambda c: set(sa_inspect(c).get_table_names()))
+        finally:
+            await engine.dispose()
+
+        assert "wireguard_peers" in tables, "adoption failed to apply the pending migration"
+
+    @pytest.mark.asyncio
     async def test_booting_twice_is_a_noop(self, tmp_path):
         url = _url(tmp_path, "twice.db")
         for _ in range(2):
@@ -112,6 +167,82 @@ class TestPreAlembicDatabaseAdoption:
             assert len(versions) == 1  # exactly one row, not duplicated
         finally:
             await engine.dispose()
+
+
+class TestUpgradeAgainstPopulatedTables:
+    def test_every_revision_applies_to_a_database_with_rows(self, tmp_path):
+        """
+        Walk the migration chain one revision at a time against a database
+        that already contains data, rather than only ever testing the
+        empty-database path.
+
+        This catches the single most common way a migration breaks a live
+        deployment: adding a NOT NULL column without a `server_default`.
+        SQLAlchemy's `default=` is applied in Python on INSERT, so the
+        database still sees NULL and `ALTER TABLE ... ADD COLUMN ... NOT
+        NULL` fails with "Cannot add a NOT NULL column with default value
+        NULL" — but only on a table that has rows, which is exactly the
+        case a fresh-database test never exercises. That failure was real
+        and was caught here first.
+        """
+        import sqlite3
+
+        from alembic import command
+        from alembic.script import ScriptDirectory
+
+        from backend.app.models import _alembic_config
+
+        db_path = tmp_path / "populated.db"
+        cfg = _alembic_config(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+        script = ScriptDirectory.from_config(cfg)
+
+        revisions = [rev.revision for rev in reversed(list(script.walk_revisions()))]
+        assert revisions, "no migrations found"
+
+        for revision in revisions:
+            command.upgrade(cfg, revision)
+
+            # Seed one row into every table that's empty, so the *next*
+            # revision has to cope with existing data.
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                tables = [
+                    r[0]
+                    for r in conn.execute(
+                        "select name from sqlite_master where type='table' "
+                        "and name not like 'sqlite_%' and name != 'alembic_version'"
+                    )
+                ]
+                for table in tables:
+                    # nosec B608 below: table/column names come from this
+                    # test's own temp database via sqlite_master, never from
+                    # user input, and sqlite cannot parameterise identifiers.
+                    if conn.execute(f"select count(*) from '{table}'").fetchone()[0]:  # nosec B608
+                        continue
+                    cols = [
+                        (r[1], r[2], r[4])
+                        for r in conn.execute(f"pragma table_info('{table}')")
+                        if r[3] and r[5] == 0  # NOT NULL, not part of the PK
+                    ]
+                    needed = [(n, t) for n, t, default in cols if default is None]
+                    if not needed:
+                        conn.execute(f"insert into '{table}' default values")  # nosec B608
+                        continue
+                    names = ", ".join(f"'{n}'" for n, _ in needed)
+                    values = ", ".join(
+                        "0" if any(k in t.upper() for k in ("INT", "REAL", "FLOAT", "BOOL", "NUMERIC"))
+                        else "'2026-01-01 00:00:00'" if "DATE" in t.upper() or "TIME" in t.upper()
+                        else f"'seed-{i}'"
+                        for i, (_, t) in enumerate(needed)
+                    )
+                    try:
+                        conn.execute(f"insert into '{table}' ({names}) values ({values})")  # nosec B608
+                    except sqlite3.IntegrityError:
+                        pass  # enum/FK constraints we can't satisfy generically
+                conn.commit()
+            finally:
+                conn.close()
 
 
 class TestMigrationIsReversible:

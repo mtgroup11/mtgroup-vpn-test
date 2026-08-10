@@ -515,6 +515,28 @@ class Node(Base):
     )
 
     # AmneziaWG specific
+    # The WireGuard server keypair is generated on the node itself; only the
+    # public half is stored here, because that is all the panel needs to put
+    # in a client config. NOTE: this is NOT `reality_public_key` — that is a
+    # Reality x25519 key for VLESS and serves an entirely different protocol.
+    # The two were previously conflated, which produced client configs
+    # pointing at a key the WireGuard server does not hold.
+    amnezia_server_public_key: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, default=None,
+    )
+    # Tunnel subnet peers are allocated out of, CIDR. The server itself takes
+    # the first usable host (.1); peers get .2 upwards.
+    #
+    # `server_default` matters as much as `default` here: `default=` is applied
+    # by Python on INSERT, so the *database* still sees NULL for a new NOT NULL
+    # column, and `ALTER TABLE ... ADD COLUMN ... NOT NULL` against a table that
+    # already has rows fails outright ("Cannot add a NOT NULL column with
+    # default value NULL"). Any NOT NULL column added to an existing table
+    # needs a server_default or the migration breaks every deployment that has
+    # data.
+    amnezia_subnet: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="10.8.0.0/24", server_default="10.8.0.0/24",
+    )
     amnezia_jc: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     amnezia_jmin: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
     amnezia_jmax: Mapped[int] = mapped_column(Integer, nullable=False, default=70)
@@ -605,6 +627,76 @@ class Subscription(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="subscriptions")
+    wireguard_peers: Mapped[list["WireGuardPeer"]] = relationship(
+        "WireGuardPeer", back_populates="subscription", cascade="all, delete-orphan",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# WireGuard / AmneziaWG Peer
+# ═══════════════════════════════════════════════════════════════════
+
+class WireGuardPeer(Base):
+    """
+    A provisioned AmneziaWG peer: one subscription's presence on one node.
+
+    Exists because a WireGuard client config is only usable if the server
+    has been told about the client's public key. Previously the amnezia
+    subscription endpoint generated a throwaway keypair on every request
+    and discarded the public half, so the returned ``.conf`` could never
+    connect — and a second fetch produced a *different* key, so even a
+    manually-registered peer would stop working.
+
+    Storing the client private key is a deliberate trade-off. Ideally the
+    client generates its own keypair and the server never sees the secret,
+    but this panel hands users a ready-made ``.conf``, which by definition
+    contains it. It is therefore stored under ``EncryptedType`` (AES-GCM-256
+    at rest) rather than in plaintext, and never leaves the panel except in
+    the config handed to that user.
+    """
+
+    __tablename__ = "wireguard_peers"
+    __table_args__ = (
+        # One peer per subscription per node.
+        UniqueConstraint("subscription_id", "node_id", name="uq_wg_peer_sub_node"),
+        # Makes an IP collision on a node structurally impossible rather than
+        # relying on the allocator getting concurrency right — two racing
+        # allocations cannot both commit.
+        UniqueConstraint("node_id", "assigned_ip", name="uq_wg_peer_node_ip"),
+        Index("ix_wg_peer_node_id", "node_id"),
+        Index("ix_wg_peer_subscription_id", "subscription_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False,
+    )
+    node_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False,
+    )
+
+    # Client keypair. Only `public_key` is ever sent to the node.
+    private_key: Mapped[str] = mapped_column(EncryptedType(), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # Tunnel address allocated out of the node's `amnezia_subnet`, host only
+    # (e.g. "10.8.0.7"); the /32 suffix is added when rendering the config.
+    assigned_ip: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Whether the node has been told about this peer. Lets a failed push be
+    # retried later instead of silently leaving a config that can't connect.
+    is_synced_to_node: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    subscription: Mapped["Subscription"] = relationship(
+        "Subscription", back_populates="wireguard_peers",
+    )
+    node: Mapped["Node"] = relationship("Node")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -956,13 +1048,33 @@ def _run_sync_migrations(connection, database_url: str) -> None:
         inspector = sa_inspect(connection)
         existing_tables = set(inspector.get_table_names())
         if "users" in existing_tables:
+            log = logging.getLogger("mtgroup.models")
             script = ScriptDirectory.from_config(cfg)
-            first = script.get_base()  # the revision whose down_revision is None
-            logging.getLogger("mtgroup.models").warning(
-                "Adopting a pre-Alembic database: stamping it at the initial "
-                "revision (%s) instead of re-creating existing tables.", first,
-            )
-            command.stamp(cfg, first)
+
+            # An unversioned database carries no record of which schema it
+            # corresponds to, so pick the stamp by inspecting what's actually
+            # there. If every table the current models define already exists,
+            # the schema is current (a `create_all()` from this same code
+            # version) and must be stamped at head — stamping lower would
+            # replay migrations that then fail on "table already exists".
+            # Otherwise it predates some migration, so stamp the initial
+            # revision and let the chain bring it forward.
+            expected_tables = set(Base.metadata.tables)
+            if expected_tables <= existing_tables:
+                target = script.get_current_head()
+                log.warning(
+                    "Adopting a pre-Alembic database whose schema is already "
+                    "current: stamping it at head (%s).", target,
+                )
+            else:
+                target = script.get_base()
+                missing = sorted(expected_tables - existing_tables)
+                log.warning(
+                    "Adopting a pre-Alembic database: stamping the initial "
+                    "revision (%s) and upgrading; missing tables: %s",
+                    target, ", ".join(missing),
+                )
+            command.stamp(cfg, target)
 
     command.upgrade(cfg, "head")
 
@@ -978,9 +1090,16 @@ async def init_db(engine):
     production with "no such column". Migrations are the only thing that
     makes a schema change actually reach an existing install.
 
-    Databases created before migrations existed are adopted automatically
-    (stamped at the initial revision, then upgraded), so no manual
-    `alembic stamp` step is needed when deploying this change.
+    Databases created before migrations existed are adopted automatically,
+    so no manual `alembic stamp` step is needed when deploying this change.
+    Adoption is necessarily a heuristic — an unversioned database records
+    nothing about which schema it corresponds to — so it compares the tables
+    present against the current models and handles the two states that occur
+    in practice: a schema already current (stamp head) and one predating some
+    migration (stamp the initial revision and upgrade). A database that is
+    genuinely *half* migrated matches no revision and will fail loudly on the
+    conflicting DDL rather than be silently guessed at, which is the correct
+    outcome: that state needs a human to look at it.
     """
     database_url = str(engine.url.render_as_string(hide_password=False))
     async with engine.begin() as conn:

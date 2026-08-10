@@ -7,6 +7,8 @@ Unix socket needed).
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from backend.app.core.killswitch import EBPFKillSwitch
@@ -176,6 +178,46 @@ class TestReleaseLockdown:
         # already waited for it).
         assert not thread.is_alive()
 
+    @pytest.mark.asyncio
+    async def test_release_does_not_wait_out_the_watchdog_sleep(self, switch, monkeypatch):
+        """
+        Releasing must interrupt the watchdog immediately, not race it.
+
+        The loop used to end each iteration with an uninterruptible
+        `time.sleep(2)` while `release_lockdown` joined with `timeout=2`.
+        A thread that had just entered the sleep therefore ignored the stop
+        flag for almost exactly as long as the join was willing to wait —
+        so under load, release returned with the watchdog still alive and
+        still holding its "should be active" view, free to re-apply the
+        lockdown *after* it had been released. It also made this test file
+        flake in a loaded full-suite run while passing in isolation.
+        """
+        import time as _time
+
+        async def _fake_helper_request(operation, payload=None, **kw):
+            return HelperResponse(ok=True)
+
+        monkeypatch.setattr(
+            "backend.app.core.killswitch.helper_request", _fake_helper_request,
+        )
+        monkeypatch.setattr(
+            "backend.app.core.killswitch.helper_request_sync",
+            lambda *a, **kw: HelperResponse(ok=True, data={"linked": True}),
+        )
+
+        await switch.trigger_lockdown()
+        thread = switch._monitor_thread
+        await asyncio.sleep(0.2)  # let the watchdog reach its wait
+
+        started = _time.monotonic()
+        await switch.release_lockdown()
+        elapsed = _time.monotonic() - started
+
+        assert not thread.is_alive()
+        # Generous bound: the point is that it returns promptly rather than
+        # burning the full 2s interval, without being sensitive to load.
+        assert elapsed < 1.0, f"release_lockdown waited {elapsed:.2f}s for the watchdog"
+
 
 class TestWatchdogLoop:
     def test_reapplies_when_helper_reports_unlinked(self, switch, monkeypatch):
@@ -206,7 +248,11 @@ class TestWatchdogLoop:
         monkeypatch.setattr(
             "backend.app.core.killswitch.helper_request_sync", _fake_helper_request_sync,
         )
-        monkeypatch.setattr("backend.app.core.killswitch.time.sleep", lambda s: None)
+        # Keep the loop fast. The inter-iteration pause is now
+        # `self._stop_monitor.wait(2)` rather than an uninterruptible
+        # `time.sleep(2)` (see test_release_does_not_wait_out_the_watchdog_sleep),
+        # so shortening it means stubbing the event's wait, not time.sleep.
+        monkeypatch.setattr(switch._stop_monitor, "wait", lambda timeout=None: False)
 
         switch.active = True
         switch._stop_monitor.clear()

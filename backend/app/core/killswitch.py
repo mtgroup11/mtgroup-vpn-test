@@ -1,6 +1,5 @@
 import logging
 import threading
-import time
 from backend.app.core.config import settings
 from backend.app.core.privileged_helper import (
     PrivilegedHelperError,
@@ -54,7 +53,15 @@ class EBPFKillSwitch:
                             )
                     except PrivilegedHelperError as e:
                         logger.error(f"Watchdog could not reach privileged helper: {e}")
-            time.sleep(2)
+            # Wait on the stop event rather than sleeping blindly: a plain
+            # `time.sleep(2)` cannot be interrupted, so a thread that had just
+            # entered it would ignore the stop flag for up to two more seconds
+            # — racing exactly against `release_lockdown`'s `join(timeout=2)`.
+            # That let release_lockdown return while the watchdog was still
+            # live and still holding the "should be active" view, so it could
+            # re-apply the lockdown *after* the release. Waiting on the event
+            # wakes immediately when release sets it.
+            self._stop_monitor.wait(2)
         logger.info("Cerberus Watchdog stopped.")
 
     async def trigger_lockdown(self):
