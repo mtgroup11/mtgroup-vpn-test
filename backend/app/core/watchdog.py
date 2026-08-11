@@ -16,6 +16,8 @@ SNAPSHOT_DIR = "/var/lib/mtgroup/snapshots"
 IPTABLES_BAK = os.path.join(SNAPSHOT_DIR, "iptables.bak")
 XRAY_BAK = os.path.join(SNAPSHOT_DIR, "xray_config.json.bak")
 XRAY_TARGET = "/usr/local/etc/xray/config.json"
+AWG_BAK = os.path.join(SNAPSHOT_DIR, "awg0_config.conf.bak")
+AWG_TARGET = "/etc/amnezia/amneziawg/awg0.conf"
 TIMEOUT_SECONDS = 60
 
 # Setup logging
@@ -72,6 +74,30 @@ class Watchdog:
         else:
             logging.error(f"Xray snapshot not found at {XRAY_BAK}")
             success = False
+
+        # 2b. Restore AmneziaWG config. Gated on the backup existing because
+        # not every host runs AmneziaWG. Unlike iptables/Xray above, neither
+        # step here affects `success`: SSH/network access — the thing the
+        # last-resort fallback below exists to guarantee — has nothing to
+        # do with whether a VPN tunnel protocol happens to be running,
+        # exactly like the `mtgroup-backend` restart below. This matters in
+        # practice: a *freshly provisioned* interface (install.sh's own use
+        # case) is far more likely to fail its first start than a
+        # previously-working Xray config is to fail restoring, and
+        # escalating to a full iptables flush over that is real collateral
+        # damage on a host running anything else.
+        if os.path.exists(AWG_BAK):
+            try:
+                subprocess.run(["cp", AWG_BAK, AWG_TARGET], check=True)
+                logging.info("AmneziaWG config restored successfully.")
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Failed to restore AmneziaWG config: {e}")
+
+            try:
+                subprocess.run(["systemctl", "restart", "awg-quick@awg0"], check=True)
+                logging.info("AmneziaWG interface restarted.")
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Failed to restart AmneziaWG interface: {e}")
 
         # 3. Restart services
         try:

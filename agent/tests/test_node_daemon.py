@@ -385,7 +385,18 @@ def awg_env(tmp_path, monkeypatch):
         restarts.append(service)
 
     monkeypatch.setattr(nd, "restart_service", _fake_restart)
-    return cfg, live_calls, restarts
+
+    watchdog_calls: list[str] = []
+    monkeypatch.setattr(
+        nd.watchdog_client, "arm_and_snapshot",
+        lambda path: watchdog_calls.append(f"arm:{path}") or True,
+    )
+    monkeypatch.setattr(
+        nd.watchdog_client, "disarm",
+        lambda: watchdog_calls.append("disarm") or True,
+    )
+
+    return cfg, live_calls, restarts, watchdog_calls
 
 
 class TestWgConfigParsing:
@@ -458,7 +469,7 @@ class TestUpsertAndRemovePeer:
 
 class TestAddPeerAction:
     async def test_adds_peer_and_preserves_the_rest_of_the_config(self, awg_env, client):
-        cfg, live_calls, restarts = awg_env
+        cfg, live_calls, restarts, watchdog_calls = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
 
         body, sig = _signed_body({
@@ -480,9 +491,12 @@ class TestAddPeerAction:
         # every other user's tunnel just to add one peer.
         assert live_calls == [("NEWCLIENT=", "10.8.0.7/32", False)]
         assert restarts == []
+        # Watchdog armed (snapshotting the pre-change config) before the
+        # write, disarmed right after — see node_daemon.py's module docstring.
+        assert watchdog_calls == [f"arm:{cfg}", "disarm"]
 
     async def test_adding_the_same_peer_twice_is_a_noop(self, awg_env, client):
-        cfg, live_calls, _ = awg_env
+        cfg, live_calls, _, watchdog_calls = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
 
         body, sig = _signed_body({
@@ -493,9 +507,10 @@ class TestAddPeerAction:
         resp = await _post(client, body, sig)
         assert (await resp.json())["status"] == "noop"
         assert live_calls == []
+        assert watchdog_calls == []  # nothing changed — no reason to arm
 
     async def test_requires_allowed_ips(self, awg_env, client):
-        cfg, _, _ = awg_env
+        cfg, _, _, _ = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
         body, sig = _signed_body({
             "_ts": int(time.time()),
@@ -507,7 +522,7 @@ class TestAddPeerAction:
         assert cfg.read_text(encoding="utf-8") == AWG_CONFIG
 
     async def test_requires_public_key(self, awg_env, client):
-        cfg, _, _ = awg_env
+        cfg, _, _, _ = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
         body, sig = _signed_body({
             "_ts": int(time.time()),
@@ -518,7 +533,7 @@ class TestAddPeerAction:
         assert resp.status == 400
 
     async def test_noop_when_interface_not_provisioned(self, awg_env, client):
-        cfg, _, _ = awg_env  # no config written
+        cfg, _, _, _ = awg_env  # no config written
         body, sig = _signed_body({
             "_ts": int(time.time()),
             "config_type": "amnezia_wg",
@@ -543,7 +558,7 @@ class TestAddPeerAction:
 
 class TestRemovePeerAction:
     async def test_removes_peer_and_keeps_the_interface(self, awg_env, client):
-        cfg, live_calls, _ = awg_env
+        cfg, live_calls, _, watchdog_calls = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
 
         body, sig = _signed_body({
@@ -558,9 +573,10 @@ class TestRemovePeerAction:
         assert "EXISTINGPEERKEY=" not in written
         assert "[Interface]" in written and "Jc = 4" in written
         assert live_calls == [("EXISTINGPEERKEY=", None, True)]
+        assert watchdog_calls == [f"arm:{cfg}", "disarm"]
 
     async def test_removing_an_absent_peer_is_a_noop(self, awg_env, client):
-        cfg, live_calls, _ = awg_env
+        cfg, live_calls, _, watchdog_calls = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
         body, sig = _signed_body({
             "_ts": int(time.time()),
@@ -571,11 +587,12 @@ class TestRemovePeerAction:
         assert (await resp.json())["status"] == "noop"
         assert live_calls == []
         assert cfg.read_text(encoding="utf-8") == AWG_CONFIG
+        assert watchdog_calls == []
 
 
 class TestAmneziaSync:
     async def test_writes_rendered_conf_text(self, awg_env, client):
-        cfg, _, restarts = awg_env
+        cfg, _, restarts, watchdog_calls = awg_env
         body, sig = _signed_body({
             "_ts": int(time.time()),
             "config_type": "amnezia_wg",
@@ -586,6 +603,7 @@ class TestAmneziaSync:
         assert resp.status == 200
         assert cfg.read_text(encoding="utf-8") == AWG_CONFIG
         assert restarts == ["awg-quick@awg0"]
+        assert watchdog_calls == [f"arm:{cfg}", "disarm"]
 
     async def test_refuses_a_json_payload_for_an_amnezia_node(self, awg_env, client):
         """
@@ -593,7 +611,7 @@ class TestAmneziaSync:
         JSON config written over awg0.conf would leave awg-quick unable to
         parse its own config and the interface down.
         """
-        cfg, _, restarts = awg_env
+        cfg, _, restarts, watchdog_calls = awg_env
         nd.atomic_write_text(str(cfg), AWG_CONFIG)
         body, sig = _signed_body({
             "_ts": int(time.time()),
@@ -605,6 +623,7 @@ class TestAmneziaSync:
         assert resp.status == 400
         assert cfg.read_text(encoding="utf-8") == AWG_CONFIG
         assert restarts == []
+        assert watchdog_calls == []  # rejected before ever touching disk
 
 
 class TestUnknownAndMalformedCommands:

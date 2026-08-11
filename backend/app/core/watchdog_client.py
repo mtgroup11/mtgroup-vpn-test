@@ -12,13 +12,15 @@ SECRET_FILE = "/etc/mtgroup/watchdog.secret"
 
 SOCK_FILE = "/var/run/mtgroup_watchdog.sock"
 SNAPSHOT_DIR = "/var/lib/mtgroup/snapshots"
+AWG_CONFIG = "/etc/amnezia/amneziawg/awg0.conf"
 
 def snapshot_and_arm():
     """
-    Snapshots current iptables and Xray configs, then arms the watchdog.
+    Snapshots current iptables, Xray, and AmneziaWG configs, then arms
+    the watchdog.
     """
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    
+
     # 1. Snapshot iptables (list-argv, no shell — output redirected in
     # Python rather than via a shell `>` operator)
     try:
@@ -36,7 +38,15 @@ def snapshot_and_arm():
             logger.info("Saved Xray config snapshot.")
         except (OSError, subprocess.CalledProcessError) as e:
             logger.warning(f"Failed to snapshot Xray config: {e}")
-            
+
+    # 2b. Snapshot AmneziaWG, if provisioned on this host
+    if os.path.exists(AWG_CONFIG):
+        try:
+            subprocess.run(["cp", AWG_CONFIG, os.path.join(SNAPSHOT_DIR, "awg0_config.conf.bak")], check=True)
+            logger.info("Saved AmneziaWG config snapshot.")
+        except (OSError, subprocess.CalledProcessError) as e:
+            logger.warning(f"Failed to snapshot AmneziaWG config: {e}")
+
     # 3. Arm watchdog with authentication
     try:
         # Read secret

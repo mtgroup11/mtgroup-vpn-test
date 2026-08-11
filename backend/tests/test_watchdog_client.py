@@ -109,6 +109,42 @@ class TestSnapshotAndArm:
             assert signature == expected_sig
             client.close.assert_called_once()
 
+    def test_snapshots_amneziawg_config_when_present(self):
+        with patch("backend.app.core.watchdog_client.os.makedirs"), \
+             patch("backend.app.core.watchdog_client.subprocess.run") as run_mock, \
+             patch("backend.app.core.watchdog_client.os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="secret")), \
+             patch("backend.app.core.watchdog_client.socket") as socket_mod:
+            socket_mod.socket.return_value.recv.return_value = b"ARMED\n"
+            wc.snapshot_and_arm()
+            awg_call = run_mock.call_args_list[2]
+            assert awg_call.args[0][0] == "cp"
+            assert awg_call.args[0][1] == wc.AWG_CONFIG
+
+    def test_skips_amneziawg_snapshot_when_config_absent(self):
+        with patch("backend.app.core.watchdog_client.os.makedirs"), \
+             patch("backend.app.core.watchdog_client.subprocess.run") as run_mock, \
+             patch("backend.app.core.watchdog_client.os.path.exists", return_value=False), \
+             patch("builtins.open", mock_open(read_data="secret")), \
+             patch("backend.app.core.watchdog_client.socket") as socket_mod:
+            socket_mod.socket.return_value.recv.return_value = b"ARMED\n"
+            wc.snapshot_and_arm()
+            assert run_mock.call_count == 1  # only iptables-save, no cp at all
+
+    def test_amneziawg_snapshot_failure_is_logged_not_raised(self):
+        def _run_side_effect(args, **kwargs):
+            if args[0] == "cp" and args[1] == wc.AWG_CONFIG:
+                raise subprocess.CalledProcessError(1, "cp")
+            return MagicMock()
+
+        with patch("backend.app.core.watchdog_client.os.makedirs"), \
+             patch("backend.app.core.watchdog_client.subprocess.run", side_effect=_run_side_effect), \
+             patch("backend.app.core.watchdog_client.os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="secret")), \
+             patch("backend.app.core.watchdog_client.socket") as socket_mod:
+            socket_mod.socket.return_value.recv.return_value = b"ARMED\n"
+            wc.snapshot_and_arm()  # must not raise
+
     def test_missing_secret_file_does_not_raise(self):
         with patch("backend.app.core.watchdog_client.os.makedirs"), \
              patch("backend.app.core.watchdog_client.subprocess.run"), \

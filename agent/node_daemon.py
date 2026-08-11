@@ -39,6 +39,12 @@ so a ``{"action": "drop_user", ...}`` command (2 keys) replaced the
 node's entire configuration and took every user on that node offline.
 Writes are atomic (temp file + ``os.replace``) so a crash mid-write can't
 leave a truncated config either.
+
+Every AmneziaWG-mutating write (``sync``, ``add_peer``, ``remove_peer``)
+arms the local Anti-Lockout Watchdog first (``agent/watchdog_client.py``,
+talking to the same daemon ``install.sh`` sets up for Xray/iptables) and
+disarms it right after. If this process crashes or hangs mid-change, the
+watchdog's own timeout restores the pre-change config on its own.
 """
 
 import asyncio
@@ -53,6 +59,8 @@ import time
 
 from aiohttp import web
 import psutil
+
+from agent import watchdog_client
 
 # Configuration
 API_KEY = os.environ.get("MTGROUP_NODE_API_KEY", "")
@@ -442,9 +450,11 @@ async def sync_handler(request: web.Request) -> web.Response:
                         {"error": "amnezia sync requires payload.config as rendered .conf text"},
                         status=400,
                     )
+                watchdog_client.arm_and_snapshot(target_file)
                 atomic_write_text(target_file, rendered)
                 logger.info("Wrote full AmneziaWG config to %s", target_file)
                 asyncio.create_task(restart_service(service))
+                watchdog_client.disarm()
                 return web.json_response({"status": "synced"})
 
             if not looks_like_full_config(payload):
@@ -547,16 +557,20 @@ async def sync_handler(request: web.Request) -> web.Response:
                 )
                 if not changed:
                     return web.json_response({"status": "noop", "reason": "peer already present"})
+                watchdog_client.arm_and_snapshot(target_file)
                 atomic_write_text(target_file, render_wg_config(interface, peers))
                 live = await apply_peer_live(public_key, allowed_ips)
+                watchdog_client.disarm()
                 logger.info("add_peer: %s -> %s (live=%s)", public_key[:16], allowed_ips, live)
                 return web.json_response({"status": "applied", "action": action, "live": live})
 
             peers, removed = remove_peer_block(peers, public_key)
             if removed == 0:
                 return web.json_response({"status": "noop", "removed": 0})
+            watchdog_client.arm_and_snapshot(target_file)
             atomic_write_text(target_file, render_wg_config(interface, peers))
             live = await apply_peer_live(public_key, None, remove=True)
+            watchdog_client.disarm()
             logger.info("remove_peer: %s (removed=%d, live=%s)", public_key[:16], removed, live)
             return web.json_response(
                 {"status": "applied", "action": action, "removed": removed, "live": live}

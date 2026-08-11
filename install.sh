@@ -88,6 +88,131 @@ else
     echo "[1/4] OS is not Debian/Ubuntu ($OS_NAME). Skipping eBPF. Advanced protections DISABLED."
 fi
 
+# 1.6. AmneziaWG Installation & Provisioning
+#
+# Idempotent and reusable both for the local all-in-one host and for
+# bootstrapping a fresh remote node (agent/node_daemon.py's add_peer/
+# remove_peer/sync only ever mutate an *existing* awg0.conf — this step
+# is what has to create it first). Re-running never rotates an existing
+# server key: every peer already handed out is signed against it, so
+# regenerating it here would silently break every issued client config.
+echo "Setting up AmneziaWG..."
+AWG_CONF_DIR="/etc/amnezia/amneziawg"
+AWG_CONF="$AWG_CONF_DIR/awg0.conf"
+AWG_LISTEN_PORT="${MTGROUP_AWG_PORT:-51820}"
+# 10.8.0.0/24 is a very common default for WireGuard-family installers —
+# collides in practice with other WireGuard tooling on the same host (a
+# real conflict hit while testing this against a box already running
+# wg-easy on that exact subnet+port). Override via MTGROUP_AWG_SUBNET if
+# so. Assumes a /24: the server takes the first host (.1), matching
+# wireguard_peers.py's candidate_addresses() convention.
+AWG_SUBNET="${MTGROUP_AWG_SUBNET:-10.8.0.0/24}"
+AWG_SERVER_IP="$(echo "$AWG_SUBNET" | cut -d'.' -f1-3).1"
+AWG_PREFIX_LEN="${AWG_SUBNET#*/}"
+AWG_PUBLIC_KEY=""
+
+if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
+    echo "AmneziaWG tools already installed."
+elif [[ "$OS_NAME" == "ubuntu" ]]; then
+    echo "Installing AmneziaWG via the Amnezia PPA (Ubuntu)..."
+    # Wrapped as an `if` condition (not a bare && chain) so a PPA/network
+    # failure degrades gracefully instead of `set -e` aborting the whole
+    # install over a non-essential protocol — same pattern the eBPF
+    # install above uses.
+    if apt-get install -y software-properties-common python3-launchpadlib gnupg2 "linux-headers-$(uname -r)" \
+        && add-apt-repository -y ppa:amnezia/ppa \
+        && apt-get update \
+        && apt-get install -y amneziawg; then
+        echo "✅ AmneziaWG installed."
+    else
+        echo "⚠️ AmneziaWG install failed — leaving it unconfigured on this host."
+    fi
+elif [[ "$OS_NAME" == "debian" ]]; then
+    echo "Installing AmneziaWG via the Amnezia PPA packages (Debian)..."
+    mkdir -p /etc/apt/keyrings
+    if apt-get install -y software-properties-common gnupg2 "linux-headers-$(uname -r)" \
+        && (gpg --keyserver keyserver.ubuntu.com --recv-keys 57290828 --export | gpg --dearmor -o /etc/apt/keyrings/amnezia.gpg) \
+        && echo "deb [signed-by=/etc/apt/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" > /etc/apt/sources.list.d/amnezia.list \
+        && apt-get update \
+        && apt-get install -y amneziawg; then
+        echo "✅ AmneziaWG installed."
+    else
+        echo "⚠️ AmneziaWG install failed — leaving it unconfigured on this host."
+    fi
+else
+    echo "⚠️ OS is not Debian/Ubuntu ($OS_NAME). Skipping AmneziaWG install — provision it manually if this node needs it."
+fi
+
+if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
+    mkdir -p "$AWG_CONF_DIR"
+
+    if [ -f "$AWG_CONF" ]; then
+        echo "Existing AmneziaWG config found at $AWG_CONF — leaving it untouched."
+        AWG_PRIVATE_KEY=$(grep '^PrivateKey' "$AWG_CONF" | head -1 | cut -d'=' -f2- | tr -d ' ')
+        AWG_PUBLIC_KEY=$(echo "$AWG_PRIVATE_KEY" | awg pubkey 2>/dev/null || true)
+    else
+        echo "Provisioning new AmneziaWG interface ($AWG_SUBNET, port $AWG_LISTEN_PORT)..."
+
+        # Values below (Jc/Jmin/Jmax/S1/S2/H1-H4, and the subnet unless
+        # overridden) match backend/app/models.py's Node column defaults
+        # exactly, so a Node row created via the dashboard with default
+        # Amnezia settings agrees with what's actually running here
+        # without extra config.
+        EGRESS_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+        if [ -z "$EGRESS_IF" ]; then
+            EGRESS_IF="eth0"
+            echo "⚠️ Could not auto-detect the default network interface for NAT — falling back to eth0. Check PostUp/PostDown in $AWG_CONF if outbound traffic doesn't work."
+        fi
+
+        AWG_PRIVATE_KEY=$(awg genkey)
+        AWG_PUBLIC_KEY=$(echo "$AWG_PRIVATE_KEY" | awg pubkey)
+
+        cat << EOF > "$AWG_CONF"
+[Interface]
+PrivateKey = $AWG_PRIVATE_KEY
+Address = $AWG_SERVER_IP/$AWG_PREFIX_LEN
+ListenPort = $AWG_LISTEN_PORT
+MTU = 1280
+PostUp = iptables -A FORWARD -i awg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $EGRESS_IF -j MASQUERADE
+PostDown = iptables -D FORWARD -i awg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $EGRESS_IF -j MASQUERADE
+Jc = 4
+Jmin = 40
+Jmax = 70
+S1 = 0
+S2 = 0
+H1 = 1
+H2 = 2
+H3 = 3
+H4 = 4
+EOF
+        chmod 600 "$AWG_CONF"
+    fi
+
+    # Arm the Anti-Lockout Watchdog before bringing the interface up.
+    # PostUp touches iptables (FORWARD/NAT) — if that, or anything else
+    # about this change, cuts the current session, the watchdog's 60s
+    # timeout restores the pre-change iptables state on its own. See
+    # backend/app/core/watchdog.py / watchdog_client.py. Needs no pip
+    # deps (stdlib only), so this works even before requirements.txt is
+    # installed further down.
+    WATCHDOG_ARMED=0
+    if [ -f /etc/mtgroup/watchdog.secret ]; then
+        if python3 -c "from backend.app.core.watchdog_client import snapshot_and_arm; snapshot_and_arm()" 2>/dev/null; then
+            WATCHDOG_ARMED=1
+        else
+            echo "⚠️ Could not arm the watchdog before starting awg0 — proceeding without that safety net."
+        fi
+    fi
+
+    systemctl enable --now "awg-quick@awg0" || echo "⚠️ Failed to start awg-quick@awg0 — check 'journalctl -u awg-quick@awg0'."
+
+    if [ "$WATCHDOG_ARMED" -eq 1 ]; then
+        echo "Watchdog armed for 60s: verify you still have SSH access from a FRESH connection (not this session), or run backend/scripts/watchdog-client.sh, to confirm and disarm — otherwise this change rolls back automatically."
+    fi
+else
+    echo "⚠️ awg/awg-quick still not found — AmneziaWG will remain unconfigured on this host."
+fi
+
 # 2. Docker Compose Configuration (Override approach)
 if [ "$EBPF_ENABLED" == "false" ]; then
     echo "Adapting Docker Swarm config via docker-compose.override.yml (reducing attack surface)..."
@@ -225,6 +350,15 @@ echo "----------------------------------------------------------"
 echo "📡 DEFAULT REALITY CONFIGURATION:"
 echo "   Public Key  : $REALITY_PUBLIC_KEY"
 echo "   Default SNI : $DEFAULT_SNI"
+echo "----------------------------------------------------------"
+if [ -n "$AWG_PUBLIC_KEY" ]; then
+    echo "🔐 AmneziaWG Server Public Key : $AWG_PUBLIC_KEY"
+    echo "   Listen Port                 : $AWG_LISTEN_PORT"
+    echo "   Enter these when adding/editing this node in the panel"
+    echo "   dashboard ('Amnezia Server Public Key' / port fields)."
+else
+    echo "🔐 AmneziaWG                   : not provisioned on this host."
+fi
 echo "----------------------------------------------------------"
 echo "🛡️  eBPF Status    : $EBPF_ENABLED"
 if [ "$EBPF_ENABLED" == "true" ]; then

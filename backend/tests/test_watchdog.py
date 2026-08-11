@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import subprocess
 import time
 from unittest.mock import MagicMock, mock_open, patch
 
@@ -191,3 +192,44 @@ class TestExecuteRollback:
         # locked out even if the snapshot-based restore couldn't run.
         assert ["iptables", "-P", "INPUT", "ACCEPT"] in commands
         assert ["iptables", "-F"] in commands
+        # No AmneziaWG backup on this host — must not even attempt it.
+        assert ["cp", wd.AWG_BAK, wd.AWG_TARGET] not in commands
+        assert ["systemctl", "restart", "awg-quick@awg0"] not in commands
+
+    def test_restores_amneziawg_when_backup_present(self, watchdog):
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="")), \
+             patch("backend.app.core.watchdog.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(returncode=0)
+            watchdog._execute_rollback()
+
+        commands = [call.args[0] for call in run_mock.call_args_list]
+        assert ["cp", wd.AWG_BAK, wd.AWG_TARGET] in commands
+        assert ["systemctl", "restart", "awg-quick@awg0"] in commands
+        assert watchdog.armed is False
+
+    def test_amneziawg_failure_does_not_escalate_to_last_resort(self, watchdog):
+        """
+        Unlike iptables/Xray, a failed AmneziaWG restore or restart must
+        NOT trigger the last-resort iptables flush — SSH/network access
+        (what that fallback exists to guarantee) has nothing to do with
+        whether a VPN tunnel protocol is running, exactly like the
+        `mtgroup-backend` restart's treatment below. This is load-bearing:
+        a freshly provisioned interface (install.sh's own use case) is far
+        more likely to fail its first start than a previously-working
+        Xray config is to fail restoring, so escalating over it would nuke
+        the firewall on an otherwise-healthy rollback.
+        """
+        def _run_side_effect(args, **kwargs):
+            if args == ["cp", wd.AWG_BAK, wd.AWG_TARGET] or args == ["systemctl", "restart", "awg-quick@awg0"]:
+                raise subprocess.CalledProcessError(1, args)
+            return MagicMock(returncode=0)
+
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data="")), \
+             patch("backend.app.core.watchdog.subprocess.run", side_effect=_run_side_effect) as run_mock:
+            watchdog._execute_rollback()
+
+        commands = [call.args[0] for call in run_mock.call_args_list]
+        assert ["iptables", "-P", "INPUT", "ACCEPT"] not in commands
+        assert ["iptables", "-F"] not in commands
