@@ -26,15 +26,30 @@ Uzak sunucularda (Node) çalışacak olan ajanın sunması gereken uç noktalar:
    - Yanıt: 200 OK, { "status": "synced" }
 
 2. GET /api/v1/health
-   - Amaç: Node'un anlık durumunu, aktif bağlantı sayısını ve CPU/RAM 
-     durumunu Master'a raporlar.
+   - Amaç: Node'un anlık durumunu, aktif bağlantı sayısını, CPU/RAM
+     durumunu ve (varsa) kullanıcı bazlı trafik verisini Master'a raporlar.
    - Header: X-MTGroup-Signature (HMAC-SHA256 imzası)
-   - Yanıt: 200 OK, 
+   - Yanıt: 200 OK,
      {
          "status": "healthy",
          "current_connections": 142,
-         "cpu_usage": 12.4
+         "cpu_usage": 12.4,
+         "amnezia_peer_traffic": {"<public_key>": {"rx_bytes": N, "tx_bytes": N}, ...},
+         "xray_user_traffic": {"<email>": N, ...}
      }
+     Trafik alanları sadece o protokol node'da kuruluysa gönderilir; ikisi
+     de yoksa hiç bulunmazlar. `check_node_health` bunları
+     `NodeOrchestrator.get_traffic_snapshot(node_id)` ile erişilebilir
+     şekilde bellekte tutar — kümülatif sayaçlardır (delta değil), bir
+     sonraki adımda (kota takibi) bunları `TrafficAccountingEngine`'e
+     beslemek üzere kalan iş, node/servis yeniden başlarsa sayaçların
+     sıfırlanabileceğini hesaba katmak zorunda.
+
+`NodeOrchestrator.start()`, health-poll loop'unu da başlatır: aktif her
+node'u `HEALTH_POLL_INTERVAL_SECONDS` aralıklarla sorgular. Bu, bu motorun
+üretimde çalışan ilk periyodik health-check mekanizmasıdır — önceden
+`check_node_health` yalnızca testlerden çağrılıyordu, hiçbir zaman
+otomatik tetiklenmiyordu.
 ===================================================================
 """
 
@@ -56,6 +71,12 @@ from backend.app.core.logging_config import audit_logger
 from backend.app.models import Node
 
 logger = logging.getLogger("mtgroup.orchestrator")
+
+# How often the health-poll loop re-checks every active node. 60s balances
+# staying reasonably current against not hammering nodes with signed HTTP
+# requests — traffic accounting (task #7, not this loop) has its own,
+# separate cadence via TrafficAccountingEngine once that's wired up.
+HEALTH_POLL_INTERVAL_SECONDS = 60
 
 
 @dataclass
@@ -83,28 +104,41 @@ class NodeOrchestrator:
         self._retry_queue: asyncio.Queue[RetryTask] = asyncio.Queue()
         self._client = httpx.AsyncClient(timeout=10.0, verify=False)  # nosec B501 - nodes use self-signed certs; payload integrity is instead guaranteed by the HMAC-SHA256 signature on every request (see _generate_signature)
         self._worker_task: asyncio.Task | None = None
+        self._health_poll_task: asyncio.Task | None = None
         self._is_running = False
         self._app_banned_ips: set[str] = set()
+        # Latest per-node traffic snapshot from /api/v1/health, keyed by
+        # node.id. Cumulative counters as reported by the node (not
+        # deltas) — turning these into per-user deltas and feeding
+        # TrafficAccountingEngine.ingest_traffic() is separate follow-up
+        # work, deliberately not done here (see module docstring).
+        self._traffic_snapshots: dict[int, dict[str, Any]] = {}
 
     async def start(self):
-        """Arka plan worker döngüsünü başlatır."""
+        """Arka plan worker döngülerini başlatır (retry kuyruğu + health-poll)."""
         if self._is_running:
             return
         self._is_running = True
         self._worker_task = asyncio.create_task(self._background_worker_loop())
+        self._health_poll_task = asyncio.create_task(self._health_poll_loop())
         logger.info("Node Orchestrator background worker started.")
 
     async def stop(self):
         """Motoru güvenli bir şekilde durdurur."""
         self._is_running = False
-        if self._worker_task:
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._worker_task, self._health_poll_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         await self._client.aclose()
         logger.info("Node Orchestrator background worker stopped.")
+
+    def get_traffic_snapshot(self, node_id: int) -> dict[str, Any] | None:
+        """Latest traffic payload reported by `node_id`'s last successful health check, or None if never seen/no traffic data available."""
+        return self._traffic_snapshots.get(node_id)
 
     def _generate_signature(self, api_key: str, body_bytes: bytes) -> str:
         """
@@ -232,7 +266,18 @@ class NodeOrchestrator:
             )
             response.raise_for_status()
             data = response.json()
-            
+
+            # Cumulative per-user traffic, if this node reported any.
+            # Stored regardless of whether a DB session factory is
+            # configured — this is an in-memory cache, not persisted.
+            traffic = {
+                key: data[key]
+                for key in ("amnezia_peer_traffic", "xray_user_traffic")
+                if key in data
+            }
+            if traffic:
+                self._traffic_snapshots[node.id] = traffic
+
             # Veritabanını güncelle
             if self._db_session_factory:
                 from sqlalchemy import select
@@ -427,6 +472,43 @@ class NodeOrchestrator:
                 break
             except Exception as e:
                 logger.error("Unexpected error in Orchestrator worker loop: %s", e)
+                await asyncio.sleep(5.0)
+
+    async def _health_poll_loop(self):
+        """
+        Periodically calls check_node_health() for every active node.
+
+        This did not exist before: `Node.health_status`/`current_connections`/
+        `last_health_check` were only ever updated by tests calling
+        check_node_health() directly, never in production. Runs every
+        HEALTH_POLL_INTERVAL_SECONDS; a failure for one node (network error,
+        node down) must not stop the rest from being checked, so each is
+        awaited individually inside its own try/except rather than
+        asyncio.gather-ed in a way where one exception could cancel siblings.
+        """
+        while self._is_running:
+            try:
+                await asyncio.sleep(HEALTH_POLL_INTERVAL_SECONDS)
+                if not self._is_running:
+                    break
+                if not self._db_session_factory:
+                    continue
+
+                from sqlalchemy import select
+                async with self._db_session_factory() as session:
+                    result = await session.execute(select(Node).where(Node.is_active.is_(True)))
+                    active_nodes = result.scalars().all()
+
+                for node in active_nodes:
+                    try:
+                        await self.check_node_health(node)
+                    except Exception as e:
+                        logger.error("Health poll failed for Node %s: %s", node.id, e)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Unexpected error in Orchestrator health-poll loop: %s", e)
                 await asyncio.sleep(5.0)
 
 # ---------------------------------------------------------------------------

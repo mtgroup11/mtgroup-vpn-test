@@ -13,7 +13,7 @@ import json
 import pytest
 
 from backend.app.core.privileged_helper import HelperResponse, PrivilegedHelperError
-from backend.app.core.proxy_manager import ProxyManager
+from backend.app.core.proxy_manager import XRAY_API_PORT, ProxyManager
 
 
 @pytest.fixture
@@ -38,13 +38,17 @@ class TestGenerateRealityKeypair:
         assert first != second
 
 
+def _vless_inbound(config):
+    return next(ib for ib in config["inbounds"] if ib["protocol"] == "vless")
+
+
 class TestBuildVlessRealityConfig:
     def test_embeds_port_uuid_and_generated_keys(self, manager):
         config = manager.build_vless_reality_config(
             port=8443, uuid="test-uuid-1234", sni_dest="cdn.example.com:443",
             server_names=["cdn.example.com"],
         )
-        inbound = config["inbounds"][0]
+        inbound = _vless_inbound(config)
         assert inbound["port"] == 8443
         assert inbound["protocol"] == "vless"
         assert inbound["settings"]["clients"][0]["id"] == "test-uuid-1234"
@@ -56,12 +60,41 @@ class TestBuildVlessRealityConfig:
 
     def test_defaults_server_names_when_not_provided(self, manager):
         config = manager.build_vless_reality_config(port=443, uuid="u")
-        reality = config["inbounds"][0]["streamSettings"]["realitySettings"]
+        reality = _vless_inbound(config)["streamSettings"]["realitySettings"]
         assert reality["serverNames"] == ["www.microsoft.com"]
 
     def test_output_is_json_serialisable(self, manager):
         config = manager.build_vless_reality_config(port=443, uuid="u")
         json.dumps(config)  # must not raise
+
+    def test_client_is_tagged_with_email_for_per_user_stats(self, manager):
+        """
+        Xray's per-user stats are keyed by the client's `email` field
+        (`user>>>{email}>>>traffic>>>...`) — without it, StatsService has
+        no per-user breakdown at all, only inbound-level aggregates.
+        """
+        config = manager.build_vless_reality_config(port=443, uuid="the-uuid")
+        assert _vless_inbound(config)["settings"]["clients"][0]["email"] == "the-uuid"
+
+    def test_enables_stats_service_on_a_loopback_only_api_inbound(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u")
+        assert config["api"]["services"] == ["StatsService"]
+        assert "stats" in config
+        api_inbound = next(ib for ib in config["inbounds"] if ib.get("tag") == "api")
+        assert api_inbound["listen"] == "127.0.0.1"
+        assert api_inbound["port"] == XRAY_API_PORT
+        assert api_inbound["protocol"] == "dokodemo-door"
+
+    def test_enables_per_user_and_per_inbound_stats_policy(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u")
+        assert config["policy"]["levels"]["0"]["statsUserUplink"] is True
+        assert config["policy"]["levels"]["0"]["statsUserDownlink"] is True
+
+    def test_routes_api_inbound_traffic_to_the_api_outbound(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u")
+        rule = config["routing"]["rules"][0]
+        assert rule["inboundTag"] == ["api"]
+        assert rule["outboundTag"] == "api"
 
 
 class TestDeployConfig:

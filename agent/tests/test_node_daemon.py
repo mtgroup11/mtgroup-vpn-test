@@ -676,3 +676,225 @@ class TestUnknownAndMalformedCommands:
         resp = await _post(client, body, sig)
         assert resp.status == 401
         assert restarts == []
+
+
+# ---------------------------------------------------------------------------
+# Per-user traffic collection
+# ---------------------------------------------------------------------------
+
+class TestParseAwgTransfer:
+    def test_parses_multiple_peer_lines(self):
+        output = "PUBKEY_A=\t1000\t2000\nPUBKEY_B=\t500\t750\n"
+        assert nd.parse_awg_transfer(output) == {
+            "PUBKEY_A=": {"rx_bytes": 1000, "tx_bytes": 2000},
+            "PUBKEY_B=": {"rx_bytes": 500, "tx_bytes": 750},
+        }
+
+    def test_empty_output_is_empty_dict(self):
+        assert nd.parse_awg_transfer("") == {}
+
+    def test_skips_malformed_lines(self):
+        output = "not-tab-separated\nPUBKEY_A=\t1000\t2000\nPUBKEY_B=\tnot-a-number\t5\n"
+        assert nd.parse_awg_transfer(output) == {"PUBKEY_A=": {"rx_bytes": 1000, "tx_bytes": 2000}}
+
+
+class TestGetAmneziaPeerTraffic:
+    async def test_returns_empty_when_not_provisioned(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: False)
+        assert await nd.get_amnezia_peer_traffic() == {}
+
+    async def test_parses_awg_show_transfer_output(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"PUBKEY_A=\t111\t222\n", b""
+
+        async def _fake_exec(*args, **kwargs):
+            assert args[:3] == ("awg", "show", nd.AWG_INTERFACE)
+            assert args[3] == "transfer"
+            return _FakeProc()
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await nd.get_amnezia_peer_traffic()
+        assert result == {"PUBKEY_A=": {"rx_bytes": 111, "tx_bytes": 222}}
+
+    async def test_returns_empty_when_awg_show_fails(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+
+        class _FakeProc:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"unable to access interface"
+
+        async def _fake_exec(*args, **kwargs):
+            return _FakeProc()
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        assert await nd.get_amnezia_peer_traffic() == {}
+
+    async def test_returns_empty_when_awg_binary_missing(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+
+        async def _fake_exec(*args, **kwargs):
+            raise FileNotFoundError("awg not found")
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        assert await nd.get_amnezia_peer_traffic() == {}
+
+
+class TestParseXrayStats:
+    def test_sums_uplink_and_downlink_per_user(self):
+        raw = json.dumps({
+            "stat": [
+                {"name": "user>>>alice@mtgroup>>>traffic>>>uplink", "value": 100},
+                {"name": "user>>>alice@mtgroup>>>traffic>>>downlink", "value": 300},
+                {"name": "user>>>bob@mtgroup>>>traffic>>>uplink", "value": 50},
+            ]
+        })
+        assert nd.parse_xray_stats(raw) == {"alice@mtgroup": 400, "bob@mtgroup": 50}
+
+    def test_ignores_non_user_traffic_stats(self):
+        raw = json.dumps({
+            "stat": [
+                {"name": "inbound>>>proxy>>>traffic>>>uplink", "value": 999},
+                {"name": "user>>>alice@mtgroup>>>traffic>>>uplink", "value": 10},
+            ]
+        })
+        assert nd.parse_xray_stats(raw) == {"alice@mtgroup": 10}
+
+    def test_invalid_json_is_empty_dict(self):
+        assert nd.parse_xray_stats("not json") == {}
+
+    def test_empty_stat_list_is_empty_dict(self):
+        assert nd.parse_xray_stats(json.dumps({"stat": []})) == {}
+
+    def test_missing_stat_key_is_empty_dict(self):
+        assert nd.parse_xray_stats(json.dumps({})) == {}
+
+
+class TestGetXrayUserTraffic:
+    async def test_returns_empty_when_config_absent(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: False)
+        assert await nd.get_xray_user_traffic() == {}
+
+    async def test_parses_statsquery_output(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+        payload = json.dumps({"stat": [{"name": "user>>>alice@mtgroup>>>traffic>>>uplink", "value": 42}]})
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return payload.encode(), b""
+
+        async def _fake_exec(*args, **kwargs):
+            assert args[0] == nd.XRAY_BIN
+            assert args[1:3] == ("api", "statsquery")
+            assert f"--server=127.0.0.1:{nd.XRAY_API_PORT}" in args
+            return _FakeProc()
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        assert await nd.get_xray_user_traffic() == {"alice@mtgroup": 42}
+
+    async def test_returns_empty_when_api_unreachable(self, monkeypatch):
+        """
+        Covers an older/hand-edited node config with no stats/api inbound
+        configured — `xray api statsquery` fails to connect, and that's
+        "no data available", not an error worth surfacing.
+        """
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+
+        class _FakeProc:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"connection refused"
+
+        async def _fake_exec(*args, **kwargs):
+            return _FakeProc()
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        assert await nd.get_xray_user_traffic() == {}
+
+    async def test_returns_empty_when_xray_binary_missing(self, monkeypatch):
+        monkeypatch.setattr(nd.os.path, "exists", lambda p: True)
+
+        async def _fake_exec(*args, **kwargs):
+            raise FileNotFoundError("xray not found")
+
+        monkeypatch.setattr(nd.asyncio, "create_subprocess_exec", _fake_exec)
+        assert await nd.get_xray_user_traffic() == {}
+
+
+def _signed_health_headers(ts: int | None = None) -> dict[str, str]:
+    ts = int(time.time()) if ts is None else ts
+    body = json.dumps({"_ts": ts}, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(API_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return {"X-MTGroup-Signature": sig, "X-MTGroup-Timestamp": str(ts)}
+
+
+class TestHealthHandler:
+    @pytest.fixture(autouse=True)
+    def _api_key(self, monkeypatch):
+        monkeypatch.setattr(nd, "API_KEY", API_KEY)
+
+    async def test_omits_traffic_keys_when_no_data_available(self, client, monkeypatch):
+        async def _empty(*a, **kw):
+            return {}
+
+        monkeypatch.setattr(nd, "get_amnezia_peer_traffic", _empty)
+        monkeypatch.setattr(nd, "get_xray_user_traffic", _empty)
+
+        resp = await client.get("/api/v1/health", headers=_signed_health_headers())
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert "amnezia_peer_traffic" not in body
+        assert "xray_user_traffic" not in body
+
+    async def test_includes_amnezia_traffic_when_present(self, client, monkeypatch):
+        async def _amnezia(*a, **kw):
+            return {"PUBKEY_A=": {"rx_bytes": 1, "tx_bytes": 2}}
+
+        async def _empty(*a, **kw):
+            return {}
+
+        monkeypatch.setattr(nd, "get_amnezia_peer_traffic", _amnezia)
+        monkeypatch.setattr(nd, "get_xray_user_traffic", _empty)
+
+        resp = await client.get("/api/v1/health", headers=_signed_health_headers())
+        body = await resp.json()
+
+        assert body["amnezia_peer_traffic"] == {"PUBKEY_A=": {"rx_bytes": 1, "tx_bytes": 2}}
+        assert "xray_user_traffic" not in body
+
+    async def test_includes_xray_traffic_when_present(self, client, monkeypatch):
+        async def _xray(*a, **kw):
+            return {"alice@mtgroup": 12345}
+
+        async def _empty(*a, **kw):
+            return {}
+
+        monkeypatch.setattr(nd, "get_amnezia_peer_traffic", _empty)
+        monkeypatch.setattr(nd, "get_xray_user_traffic", _xray)
+
+        resp = await client.get("/api/v1/health", headers=_signed_health_headers())
+        body = await resp.json()
+
+        assert body["xray_user_traffic"] == {"alice@mtgroup": 12345}
+        assert "amnezia_peer_traffic" not in body
+
+    async def test_bad_signature_rejected(self, client):
+        resp = await client.get(
+            "/api/v1/health",
+            headers={"X-MTGroup-Signature": "deadbeef", "X-MTGroup-Timestamp": str(int(time.time()))},
+        )
+        assert resp.status == 401
+
+    async def test_stale_timestamp_rejected(self, client):
+        resp = await client.get("/api/v1/health", headers=_signed_health_headers(ts=int(time.time()) - 120))
+        assert resp.status == 401

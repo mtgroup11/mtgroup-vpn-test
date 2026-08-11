@@ -185,6 +185,52 @@ class TestCheckNodeHealth:
         await orch.check_node_health(node)
         orch._mark_node_offline.assert_awaited_once_with(node.id)
 
+    @pytest.mark.asyncio
+    async def test_captures_traffic_snapshot_when_present(self, orch, monkeypatch):
+        db_node = SimpleNamespace(id=1, is_active=False, health_status="offline", current_connections=0, last_health_check=None)
+        session = AsyncMock()
+        session.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=db_node))
+        orch._db_session_factory = _db_factory_with_session(session)
+
+        async def _fake_send(*a, **kw):
+            return httpx.Response(
+                200, request=httpx.Request("GET", "https://x"),
+                json={
+                    "status": "healthy",
+                    "current_connections": 1,
+                    "amnezia_peer_traffic": {"PUBKEY=": {"rx_bytes": 10, "tx_bytes": 20}},
+                    "xray_user_traffic": {"alice@mtgroup": 999},
+                },
+            )
+
+        monkeypatch.setattr(orch, "_send_request", _fake_send)
+
+        node = _make_node(id=7)
+        await orch.check_node_health(node)
+
+        assert orch.get_traffic_snapshot(7) == {
+            "amnezia_peer_traffic": {"PUBKEY=": {"rx_bytes": 10, "tx_bytes": 20}},
+            "xray_user_traffic": {"alice@mtgroup": 999},
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_snapshot_stored_when_node_reports_no_traffic(self, orch, monkeypatch):
+        async def _fake_send(*a, **kw):
+            return httpx.Response(
+                200, request=httpx.Request("GET", "https://x"),
+                json={"status": "healthy", "current_connections": 0},
+            )
+
+        monkeypatch.setattr(orch, "_send_request", _fake_send)
+
+        node = _make_node(id=9)
+        await orch.check_node_health(node)
+
+        assert orch.get_traffic_snapshot(9) is None
+
+    def test_get_traffic_snapshot_defaults_to_none_for_unknown_node(self, orch):
+        assert orch.get_traffic_snapshot(12345) is None
+
 
 class TestIpBanEnforcement:
     @pytest.mark.asyncio
@@ -353,11 +399,118 @@ class TestBackgroundWorkerLoopBackoff:
         assert requeued.next_retry_at > time.time()  # real backoff scheduling, not immediate
 
 
+class TestHealthPollLoop:
+    """
+    Runs the REAL `_health_poll_loop`, same pattern as
+    TestBackgroundWorkerLoopBackoff: `asyncio.sleep` faked out so the test
+    doesn't wait HEALTH_POLL_INTERVAL_SECONDS for real, loop stopped after
+    a fixed number of iterations by flipping `_is_running`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_polls_every_active_node(self, orch, monkeypatch):
+        nodes = [_make_node(id=1), _make_node(id=2)]
+        session = AsyncMock()
+        session.execute.return_value = MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=nodes))))
+        orch._db_session_factory = _db_factory_with_session(session)
+
+        checked: list[int] = []
+
+        async def _fake_check(node):
+            checked.append(node.id)
+
+        monkeypatch.setattr(orch, "check_node_health", _fake_check)
+
+        real_sleep = __import__("asyncio").sleep
+        sleep_calls = 0
+
+        async def _fake_sleep(seconds):
+            # First sleep must return normally so the loop body (the node
+            # checks) actually runs; stopping on the *second* call (the
+            # next iteration's sleep) ends the loop after exactly one
+            # round rather than aborting before any node is checked.
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                orch._is_running = False
+            await real_sleep(0)
+
+        monkeypatch.setattr("backend.app.orchestrator.asyncio.sleep", _fake_sleep)
+
+        orch._is_running = True
+        import asyncio as _asyncio
+        await _asyncio.wait_for(orch._health_poll_loop(), timeout=5.0)
+
+        assert checked == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_one_node_failure_does_not_stop_the_others(self, orch, monkeypatch):
+        nodes = [_make_node(id=1), _make_node(id=2)]
+        session = AsyncMock()
+        session.execute.return_value = MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=nodes))))
+        orch._db_session_factory = _db_factory_with_session(session)
+
+        checked: list[int] = []
+
+        async def _fake_check(node):
+            if node.id == 1:
+                raise httpx.ConnectError("down")
+            checked.append(node.id)
+
+        monkeypatch.setattr(orch, "check_node_health", _fake_check)
+
+        real_sleep = __import__("asyncio").sleep
+        sleep_calls = 0
+
+        async def _fake_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                orch._is_running = False
+            await real_sleep(0)
+
+        monkeypatch.setattr("backend.app.orchestrator.asyncio.sleep", _fake_sleep)
+
+        orch._is_running = True
+        import asyncio as _asyncio
+        await _asyncio.wait_for(orch._health_poll_loop(), timeout=5.0)
+
+        assert checked == [2]  # node 1 failed, node 2 was still checked
+
+    @pytest.mark.asyncio
+    async def test_noop_without_a_db_session_factory(self, orch, monkeypatch):
+        orch._db_session_factory = None
+
+        called = False
+
+        async def _fake_check(node):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(orch, "check_node_health", _fake_check)
+
+        real_sleep = __import__("asyncio").sleep
+
+        async def _fake_sleep(seconds):
+            orch._is_running = False
+            await real_sleep(0)
+
+        monkeypatch.setattr("backend.app.orchestrator.asyncio.sleep", _fake_sleep)
+
+        orch._is_running = True
+        import asyncio as _asyncio
+        await _asyncio.wait_for(orch._health_poll_loop(), timeout=5.0)
+
+        assert called is False
+
+
 class TestLifecycle:
     @pytest.mark.asyncio
     async def test_start_stop_is_clean(self, orch):
         await orch.start()
         assert orch._is_running is True
+        assert orch._health_poll_task is not None
         await orch.stop()
         assert orch._is_running is False
         assert orch._client.is_closed
+        assert orch._health_poll_task.cancelled() or orch._health_poll_task.done()

@@ -5,7 +5,12 @@ Lightweight background agent for remote servers.
 Receives commands from the Master panel over ``POST /api/v1/sync``,
 verifies HMAC-SHA256 + a ±30s replay window, applies them to the local
 Xray/Sing-box config, and restarts the service.
-Reports health metrics over ``GET /api/v1/health``.
+Reports health metrics over ``GET /api/v1/health``, including per-user
+traffic when available: ``amnezia_peer_traffic`` (keyed by WireGuard
+public key, from ``awg show transfer``) and ``xray_user_traffic`` (keyed
+by the client ``email`` set in ``proxy_manager.build_vless_reality_config``,
+from Xray's StatsService). Both are best-effort and simply absent from the
+response when that protocol isn't provisioned on this node.
 
 Command protocol (``action`` lives inside ``payload``; absent means
 ``sync``)::
@@ -93,6 +98,15 @@ def verify_signature(api_key: str, signature: str, body_bytes: bytes) -> bool:
 AWG_INTERFACE = os.environ.get("MTGROUP_AWG_INTERFACE", "awg0")
 AWG_CONFIG_PATH = f"/etc/amnezia/amneziawg/{AWG_INTERFACE}.conf"
 
+XRAY_CONFIG_PATH = "/usr/local/etc/xray/config.json"
+SINGBOX_CONFIG_PATH = "/etc/sing-box/config.json"
+
+# Loopback-only port Xray's StatsService API listens on, matching
+# proxy_manager.build_vless_reality_config's XRAY_API_PORT. Overridable in
+# case a node's Xray config was hand-tuned to a different port.
+XRAY_API_PORT = int(os.environ.get("MTGROUP_XRAY_API_PORT", "10085"))
+XRAY_BIN = os.environ.get("MTGROUP_XRAY_BIN", "xray")
+
 
 def is_amnezia(config_type: str) -> bool:
     lowered = (config_type or "").lower()
@@ -105,11 +119,11 @@ def resolve_target(config_type: str) -> tuple[str, str]:
     if is_amnezia(lowered):
         return AWG_CONFIG_PATH, f"awg-quick@{AWG_INTERFACE}"
     if "singbox" in lowered or "sing-box" in lowered:
-        return "/etc/sing-box/config.json", "sing-box"
+        return SINGBOX_CONFIG_PATH, "sing-box"
     if "xray" in lowered or "vless" in lowered or "trojan" in lowered:
-        return "/usr/local/etc/xray/config.json", "xray"
+        return XRAY_CONFIG_PATH, "xray"
     logger.warning("Unknown config_type %r — defaulting to xray.", config_type)
-    return "/usr/local/etc/xray/config.json", "xray"
+    return XRAY_CONFIG_PATH, "xray"
 
 
 # ── AmneziaWG / WireGuard config editing ──────────────────────────────
@@ -608,6 +622,117 @@ def get_active_connections() -> int:
             return 0
 
 
+# ── Per-user traffic collection ────────────────────────────────────────
+#
+# Both functions below are best-effort telemetry: neither raises, and both
+# return {} whenever the relevant protocol isn't provisioned on this node
+# or its stats source isn't reachable. Callers (health_handler) only
+# include the corresponding key in the response when it's non-empty, so
+# an unconfigured protocol doesn't clutter every health check on nodes
+# that don't run it.
+
+def parse_awg_transfer(output: str) -> dict[str, dict[str, int]]:
+    """
+    Parse `awg show <iface> transfer` output: one
+    `public_key\trx_bytes\ttx_bytes` line per peer (wg-tools' standard
+    machine-readable dump format, which awg is CLI-compatible with).
+    """
+    traffic: dict[str, dict[str, int]] = {}
+    for line in output.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 3:
+            continue
+        public_key, rx, tx = parts
+        try:
+            traffic[public_key] = {"rx_bytes": int(rx), "tx_bytes": int(tx)}
+        except ValueError:
+            continue
+    return traffic
+
+
+async def get_amnezia_peer_traffic() -> dict[str, dict[str, int]]:
+    """
+    Per-peer cumulative rx/tx byte counters for the local AmneziaWG
+    interface, keyed by public key — matches `WireGuardPeer.public_key`
+    on the master, so no extra identity mapping is needed there.
+    """
+    if not os.path.exists(AWG_CONFIG_PATH):
+        return {}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "awg", "show", AWG_INTERFACE, "transfer",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                "`awg show %s transfer` failed: %s",
+                AWG_INTERFACE, stderr.decode(errors="replace").strip(),
+            )
+            return {}
+        return parse_awg_transfer(stdout.decode(errors="replace"))
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning("Could not run `awg show transfer`: %s", exc)
+        return {}
+
+
+def parse_xray_stats(raw_json: str) -> dict[str, int]:
+    """
+    Parse `xray api statsquery` JSON output into {email: total_bytes},
+    summing each user's uplink+downlink. Stat names look like
+    `user>>>{email}>>>traffic>>>uplink` / `...>>>downlink` — see
+    proxy_manager.build_vless_reality_config, which is what tags clients
+    with `email` in the first place.
+    """
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {}
+
+    totals: dict[str, int] = {}
+    for entry in data.get("stat", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        parts = str(entry.get("name", "")).split(">>>")
+        if len(parts) != 4 or parts[0] != "user" or parts[2] != "traffic":
+            continue
+        email = parts[1]
+        try:
+            totals[email] = totals.get(email, 0) + int(entry.get("value", 0))
+        except (TypeError, ValueError):
+            continue
+    return totals
+
+
+async def get_xray_user_traffic() -> dict[str, int]:
+    """
+    Per-user cumulative traffic (uplink+downlink bytes) from Xray's
+    StatsService, keyed by client `email`. Returns {} on any older config
+    that predates the stats/api inbound (see proxy_manager.py) as much as
+    on a missing xray binary — both are "no data available", not errors.
+    """
+    if not os.path.exists(XRAY_CONFIG_PATH):
+        return {}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            XRAY_BIN, "api", "statsquery",
+            f"--server=127.0.0.1:{XRAY_API_PORT}", "-pattern", "user>>>",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                "`xray api statsquery` failed (API inbound may not be "
+                "configured on this node's config): %s",
+                stderr.decode(errors="replace").strip(),
+            )
+            return {}
+        return parse_xray_stats(stdout.decode(errors="replace"))
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning("Could not run `xray api statsquery`: %s", exc)
+        return {}
+
+
 async def health_handler(request: web.Request) -> web.Response:
     """
     GET /api/v1/health
@@ -639,14 +764,24 @@ async def health_handler(request: web.Request) -> web.Response:
         cpu_usage = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
         active_conns = get_active_connections()
-        
-        return web.json_response({
+
+        response = {
             "status": "healthy",
             "current_connections": active_conns,
             "cpu_usage": cpu_usage,
             "ram_usage_percent": mem.percent,
             "ram_free_mb": mem.available // (1024 * 1024)
-        })
+        }
+
+        amnezia_traffic = await get_amnezia_peer_traffic()
+        if amnezia_traffic:
+            response["amnezia_peer_traffic"] = amnezia_traffic
+
+        xray_traffic = await get_xray_user_traffic()
+        if xray_traffic:
+            response["xray_user_traffic"] = xray_traffic
+
+        return web.json_response(response)
     except Exception as e:
         logger.error(f"Error in health_handler: {e}")
         return web.json_response({"error": "Internal Server Error"}, status=500)

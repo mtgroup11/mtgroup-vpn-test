@@ -106,7 +106,12 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks conditionally
     logging.info("Starting background engines...")
-    tasks = [honeypot.start(), autocdn_engine.start()]  # App-level decoy + Auto-CDN always start
+    # orchestrator.start() launches its retry-queue worker and node
+    # health-poll loop. Previously never called anywhere — the
+    # db_session_factory injection above was the only wiring that existed,
+    # so failed config pushes never actually retried and node health was
+    # never polled in production; only tests exercised these loops.
+    tasks = [honeypot.start(), autocdn_engine.start(), orchestrator.start()]  # App-level decoy + Auto-CDN + Node Orchestrator always start
     if getattr(settings, 'EBPF_ENABLED', False):
         tasks.append(hopper_engine.start())
         tasks.append(ai_engine.start())
@@ -119,7 +124,7 @@ async def lifespan(app: FastAPI):
     yield
     
     logging.info(" Shutting down gracefully...")
-    stop_tasks = [honeypot.stop(), autocdn_engine.stop()]
+    stop_tasks = [honeypot.stop(), autocdn_engine.stop(), orchestrator.stop()]
     if getattr(settings, 'EBPF_ENABLED', False):
         stop_tasks.append(hopper_engine.stop())
         stop_tasks.append(ai_engine.stop())
