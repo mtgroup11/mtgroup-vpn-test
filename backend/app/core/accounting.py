@@ -37,6 +37,10 @@ class TrafficAccountingEngine:
         self._worker_task: asyncio.Task | None = None
         self._traffic_buffer: dict[int, int] = {}
         self._buffer_lock = asyncio.Lock()
+        # Last-seen CUMULATIVE byte counter per (node_id, identifier), used
+        # by ingest_node_traffic() to compute deltas from the cumulative
+        # counters nodes report. See _consume_delta().
+        self._last_node_counters: dict[tuple[int, str], int] = {}
 
     async def start(self):
         if self._is_running:
@@ -64,6 +68,103 @@ class TrafficAccountingEngine:
             return
         async with self._buffer_lock:
             self._traffic_buffer[user_id] = self._traffic_buffer.get(user_id, 0) + bytes_delta
+
+    async def ingest_node_traffic(self, node, traffic: dict) -> None:
+        """
+        Translates a node's health-check traffic snapshot (cumulative
+        counters as reported by the node — see agent/node_daemon.py's
+        get_amnezia_peer_traffic()/get_xray_user_traffic(), surfaced via
+        NodeOrchestrator.check_node_health()) into per-user deltas and
+        feeds them into ingest_traffic().
+
+        Never raises — this is best-effort telemetry processing, not a
+        request that should ever fail its caller (typically fired via
+        asyncio.create_task from a health check). A snapshot with neither
+        key is a no-op.
+        """
+        try:
+            amnezia = traffic.get("amnezia_peer_traffic")
+            if amnezia:
+                await self._ingest_amnezia_traffic(node, amnezia)
+
+            xray = traffic.get("xray_user_traffic")
+            if xray:
+                await self._ingest_xray_traffic(node, xray)
+        except Exception as e:
+            logger.error("Error ingesting traffic snapshot from node %s: %s", node.id, e)
+
+    def _consume_delta(self, node_id: int, identifier: str, cumulative_bytes: int) -> int:
+        """
+        Turns a cumulative counter into a delta since the last call for
+        this (node, identifier) pair.
+
+        A `cumulative_bytes` lower than the last-seen value means the
+        counter reset — the node or its VPN service restarted, so the
+        counter started over from zero — and the new value itself IS the
+        delta (traffic since the reset), not `new - old`, which would be
+        negative and silently dropped by ingest_traffic() (it no-ops on
+        bytes_delta <= 0).
+        """
+        key = (node_id, identifier)
+        last = self._last_node_counters.get(key, 0)
+        self._last_node_counters[key] = cumulative_bytes
+        return cumulative_bytes if cumulative_bytes < last else cumulative_bytes - last
+
+    async def _ingest_amnezia_traffic(self, node, peer_traffic: dict[str, dict[str, int]]) -> None:
+        """Maps each peer's public key to its subscription's user_id via a direct DB join — WireGuardPeer already stores this relationship."""
+        from sqlalchemy import select
+
+        from backend.app.models import Subscription, WireGuardPeer
+
+        async with self._db_session_factory() as session:
+            result = await session.execute(
+                select(WireGuardPeer.public_key, Subscription.user_id)
+                .join(Subscription, Subscription.id == WireGuardPeer.subscription_id)
+                .where(WireGuardPeer.node_id == node.id)
+            )
+            peer_to_user = dict(result.all())
+
+        for public_key, counters in peer_traffic.items():
+            user_id = peer_to_user.get(public_key)
+            if user_id is None:
+                # Reported by the node but not (or no longer) registered to
+                # any subscription on this node — nothing to bill it to.
+                continue
+            total = int(counters.get("rx_bytes", 0)) + int(counters.get("tx_bytes", 0))
+            delta = self._consume_delta(node.id, f"awg:{public_key}", total)
+            await self.ingest_traffic(user_id, delta)
+
+    async def _ingest_xray_traffic(self, node, user_traffic: dict[str, int]) -> None:
+        """
+        Reverse-maps Xray's `email` stat key back to a user_id.
+
+        No email->user_id table exists, so this recomputes the same
+        deterministic per-(user, node) UUID subscriptions.py already uses
+        for VLESS client IDs (`_generate_user_uuid`) against every active
+        user and matches strings. O(active users) per node per health
+        check — acceptable at the 60s polling cadence this runs at, would
+        need revisiting at very large user counts.
+        """
+        from sqlalchemy import select
+
+        from backend.app.api.subscriptions import _generate_user_uuid
+        from backend.app.models import User
+
+        async with self._db_session_factory() as session:
+            result = await session.execute(select(User.id).where(User.is_active.is_(True)))
+            active_user_ids = [row[0] for row in result.all()]
+
+        email_to_user = {
+            _generate_user_uuid(user_id, node.id): user_id
+            for user_id in active_user_ids
+        }
+
+        for email, total_bytes in user_traffic.items():
+            user_id = email_to_user.get(email)
+            if user_id is None:
+                continue
+            delta = self._consume_delta(node.id, f"xray:{email}", int(total_bytes))
+            await self.ingest_traffic(user_id, delta)
 
     async def _fetch_live_traffic_data(self) -> dict[int, int]:
         """

@@ -50,6 +50,13 @@ node'u `HEALTH_POLL_INTERVAL_SECONDS` aralıklarla sorgular. Bu, bu motorun
 üretimde çalışan ilk periyodik health-check mekanizmasıdır — önceden
 `check_node_health` yalnızca testlerden çağrılıyordu, hiçbir zaman
 otomatik tetiklenmiyordu.
+
+`NodeOrchestrator.set_accounting_engine(engine)`, `check_node_health()`'in
+trafik verisini `engine.ingest_node_traffic(node, traffic)`'e ilettiği
+opsiyonel bir bağlantı noktasıdır — enjekte edilmediği sürece (bugünkü hal,
+`main.py` hiçbir şey enjekte etmiyor) trafik sadece `get_traffic_snapshot()`
+üzerinden bellekte tutulur, hiçbir yere aktarılmaz. `TrafficAccountingEngine`
+kendisi hâlâ `lifespan()`'a bağlanmadı — bkz. CLAUDE.md.
 ===================================================================
 """
 
@@ -108,11 +115,27 @@ class NodeOrchestrator:
         self._is_running = False
         self._app_banned_ips: set[str] = set()
         # Latest per-node traffic snapshot from /api/v1/health, keyed by
-        # node.id. Cumulative counters as reported by the node (not
-        # deltas) — turning these into per-user deltas and feeding
-        # TrafficAccountingEngine.ingest_traffic() is separate follow-up
-        # work, deliberately not done here (see module docstring).
+        # node.id. Cumulative counters as reported by the node, not deltas.
         self._traffic_snapshots: dict[int, dict[str, Any]] = {}
+        # Optional TrafficAccountingEngine reference. Deliberately NOT
+        # constructed or injected here, nor in main.py's lifespan() —
+        # whether TrafficAccountingEngine actually runs (and therefore
+        # whether it ever suspends anyone) remains the user's own decision
+        # (see CLAUDE.md's "Known deferred decisions"). Not importing
+        # TrafficAccountingEngine at module level also avoids a circular
+        # import: accounting.py already imports `orchestrator` from here.
+        # Typed as Any rather than importing the class just for a hint.
+        self._accounting_engine: Any | None = None
+
+    def set_accounting_engine(self, engine: Any) -> None:
+        """
+        Injects the object that receives node traffic snapshots (expected
+        to expose an async `ingest_node_traffic(node, traffic)` — see
+        TrafficAccountingEngine). Call this only once that engine has
+        actually been enabled; check_node_health() only forwards traffic
+        when this has been set.
+        """
+        self._accounting_engine = engine
 
     async def start(self):
         """Arka plan worker döngülerini başlatır (retry kuyruğu + health-poll)."""
@@ -277,6 +300,11 @@ class NodeOrchestrator:
             }
             if traffic:
                 self._traffic_snapshots[node.id] = traffic
+                if self._accounting_engine is not None:
+                    # Fire-and-forget: ingest_node_traffic() is best-effort
+                    # telemetry processing (never raises) and must not
+                    # delay the health-check response handling below.
+                    asyncio.create_task(self._accounting_engine.ingest_node_traffic(node, traffic))
 
             # Veritabanını güncelle
             if self._db_session_factory:

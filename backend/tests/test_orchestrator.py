@@ -231,6 +231,62 @@ class TestCheckNodeHealth:
     def test_get_traffic_snapshot_defaults_to_none_for_unknown_node(self, orch):
         assert orch.get_traffic_snapshot(12345) is None
 
+    @pytest.mark.asyncio
+    async def test_forwards_traffic_to_accounting_engine_when_injected(self, orch, monkeypatch):
+        async def _fake_send(*a, **kw):
+            return httpx.Response(
+                200, request=httpx.Request("GET", "https://x"),
+                json={"status": "healthy", "current_connections": 1, "xray_user_traffic": {"a": 1}},
+            )
+
+        monkeypatch.setattr(orch, "_send_request", _fake_send)
+
+        engine = AsyncMock()
+        orch.set_accounting_engine(engine)
+
+        node = _make_node(id=3)
+        await orch.check_node_health(node)
+
+        # Fired via asyncio.create_task — give it a tick to actually run.
+        import asyncio
+        await asyncio.sleep(0)
+
+        engine.ingest_node_traffic.assert_awaited_once_with(node, {"xray_user_traffic": {"a": 1}})
+
+    @pytest.mark.asyncio
+    async def test_does_not_touch_accounting_engine_when_not_injected(self, orch, monkeypatch):
+        """Default state (no engine set, matching main.py not constructing
+        one) — must not raise or reference `_accounting_engine` unsafely."""
+        async def _fake_send(*a, **kw):
+            return httpx.Response(
+                200, request=httpx.Request("GET", "https://x"),
+                json={"status": "healthy", "current_connections": 1, "xray_user_traffic": {"a": 1}},
+            )
+
+        monkeypatch.setattr(orch, "_send_request", _fake_send)
+        assert orch._accounting_engine is None
+
+        await orch.check_node_health(_make_node(id=4))  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_does_not_forward_when_node_reports_no_traffic(self, orch, monkeypatch):
+        async def _fake_send(*a, **kw):
+            return httpx.Response(
+                200, request=httpx.Request("GET", "https://x"),
+                json={"status": "healthy", "current_connections": 1},
+            )
+
+        monkeypatch.setattr(orch, "_send_request", _fake_send)
+
+        engine = AsyncMock()
+        orch.set_accounting_engine(engine)
+
+        await orch.check_node_health(_make_node(id=5))
+        import asyncio
+        await asyncio.sleep(0)
+
+        engine.ingest_node_traffic.assert_not_awaited()
+
 
 class TestIpBanEnforcement:
     @pytest.mark.asyncio

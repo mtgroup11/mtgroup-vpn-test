@@ -356,3 +356,184 @@ class TestDropUserFromNodes:
 
         # Should not raise — errors are logged and swallowed.
         await engine._drop_user_from_nodes(user)
+
+
+class TestConsumeDelta:
+    """Pure logic, no DB — the cumulative-counter-to-delta conversion that
+    every node-traffic path (AmneziaWG, Xray) relies on."""
+
+    def test_first_observation_is_the_full_value(self, engine):
+        assert engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=500) == 500
+
+    def test_second_observation_is_the_difference(self, engine):
+        engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=500)
+        assert engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=800) == 300
+
+    def test_counter_reset_returns_the_new_value_not_a_negative_delta(self, engine):
+        """
+        A node/service restart resets the cumulative counter to (near)
+        zero. `new - old` would be negative here and get silently dropped
+        by ingest_traffic() — the correct delta is the new value itself
+        (traffic accrued since the reset).
+        """
+        engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=10_000)
+        assert engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=50) == 50
+
+    def test_different_identifiers_on_the_same_node_are_independent(self, engine):
+        engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=100)
+        engine._consume_delta(node_id=1, identifier="b", cumulative_bytes=999)
+        assert engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=150) == 50
+
+    def test_same_identifier_on_different_nodes_is_independent(self, engine):
+        engine._consume_delta(node_id=1, identifier="a", cumulative_bytes=100)
+        # A different node reporting the same identifier string starts its
+        # own tracking from zero, not from node 1's last-seen value.
+        assert engine._consume_delta(node_id=2, identifier="a", cumulative_bytes=100) == 100
+
+
+@pytest_asyncio.fixture
+async def amnezia_traffic_env(db_engine):
+    """A real user + subscription + AmneziaWG node + provisioned peer."""
+    from backend.app.core.wireguard_peers import get_or_create_peer
+    from backend.app.models import NodeProtocol, Subscription, create_session_factory
+
+    factory = create_session_factory(db_engine)
+    async with factory() as session:
+        user = User(username="awg-traffic-user", hashed_password=hash_password("Pw123456!"))
+        session.add(user)
+        await session.flush()
+
+        sub = Subscription(user_id=user.id, token="awg-traffic-token")
+        node = Node(
+            name="awg-traffic-node", address="10.0.0.20", protocol=NodeProtocol.AMNEZIA_WG,
+            amnezia_subnet="10.9.0.0/24", amnezia_server_public_key="SERVERPUB=",
+        )
+        session.add_all([sub, node])
+        await session.commit()
+        await session.refresh(sub)
+        await session.refresh(node)
+
+        peer, _created = await get_or_create_peer(session, subscription_id=sub.id, node=node)
+        await session.commit()
+
+        user_id, node_obj, public_key = user.id, node, peer.public_key
+
+    return TrafficAccountingEngine(db_session_factory=factory), factory, user_id, node_obj, public_key
+
+
+class TestIngestAmneziaTraffic:
+    @pytest.mark.asyncio
+    async def test_maps_public_key_to_user_and_buffers_delta(self, amnezia_traffic_env):
+        engine, _factory, user_id, node, public_key = amnezia_traffic_env
+
+        await engine._ingest_amnezia_traffic(node, {public_key: {"rx_bytes": 100, "tx_bytes": 50}})
+
+        assert engine._traffic_buffer == {user_id: 150}
+
+    @pytest.mark.asyncio
+    async def test_second_call_ingests_only_the_delta(self, amnezia_traffic_env):
+        engine, _factory, user_id, node, public_key = amnezia_traffic_env
+
+        await engine._ingest_amnezia_traffic(node, {public_key: {"rx_bytes": 100, "tx_bytes": 50}})
+        await engine._ingest_amnezia_traffic(node, {public_key: {"rx_bytes": 300, "tx_bytes": 50}})
+
+        assert engine._traffic_buffer[user_id] == 150 + 200  # +200 delta from the second call
+
+    @pytest.mark.asyncio
+    async def test_unknown_public_key_is_ignored(self, amnezia_traffic_env):
+        engine, _factory, user_id, node, _public_key = amnezia_traffic_env
+
+        await engine._ingest_amnezia_traffic(node, {"NEVER-PROVISIONED=": {"rx_bytes": 1, "tx_bytes": 1}})
+
+        assert engine._traffic_buffer == {}
+
+
+@pytest_asyncio.fixture
+async def xray_traffic_env(db_engine):
+    from backend.app.api.subscriptions import _generate_user_uuid
+    from backend.app.models import NodeProtocol, create_session_factory
+
+    factory = create_session_factory(db_engine)
+    async with factory() as session:
+        user = User(username="xray-traffic-user", hashed_password=hash_password("Pw123456!"), is_active=True)
+        inactive_user = User(username="xray-inactive-user", hashed_password=hash_password("Pw123456!"), is_active=False)
+        node = Node(name="xray-traffic-node", address="10.0.0.21", protocol=NodeProtocol.VLESS_REALITY)
+        session.add_all([user, inactive_user, node])
+        await session.commit()
+        await session.refresh(user)
+        await session.refresh(inactive_user)
+        await session.refresh(node)
+        user_id, inactive_user_id, node_obj = user.id, inactive_user.id, node
+
+    email = _generate_user_uuid(user_id, node_obj.id)
+    return TrafficAccountingEngine(db_session_factory=factory), user_id, inactive_user_id, node_obj, email
+
+
+class TestIngestXrayTraffic:
+    @pytest.mark.asyncio
+    async def test_maps_email_to_user_via_deterministic_uuid_and_buffers(self, xray_traffic_env):
+        engine, user_id, _inactive_id, node, email = xray_traffic_env
+
+        await engine._ingest_xray_traffic(node, {email: 12345})
+
+        assert engine._traffic_buffer == {user_id: 12345}
+
+    @pytest.mark.asyncio
+    async def test_inactive_users_are_not_matched(self, xray_traffic_env):
+        """
+        Only active users are candidates for reverse-mapping — an inactive
+        user's uuid5 for this node would never legitimately appear in a
+        node's stats (nothing provisions inbound clients for suspended
+        users), so excluding them narrows the search space too.
+        """
+        from backend.app.api.subscriptions import _generate_user_uuid
+
+        engine, _user_id, inactive_user_id, node, _email = xray_traffic_env
+        inactive_email = _generate_user_uuid(inactive_user_id, node.id)
+
+        await engine._ingest_xray_traffic(node, {inactive_email: 999})
+
+        assert engine._traffic_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_unrecognized_email_is_ignored(self, xray_traffic_env):
+        engine, _user_id, _inactive_id, node, _email = xray_traffic_env
+
+        await engine._ingest_xray_traffic(node, {"not-a-real-uuid": 999})
+
+        assert engine._traffic_buffer == {}
+
+
+class TestIngestNodeTraffic:
+    @pytest.mark.asyncio
+    async def test_dispatches_amnezia_traffic(self, amnezia_traffic_env):
+        engine, _factory, user_id, node, public_key = amnezia_traffic_env
+
+        await engine.ingest_node_traffic(node, {"amnezia_peer_traffic": {public_key: {"rx_bytes": 10, "tx_bytes": 5}}})
+
+        assert engine._traffic_buffer == {user_id: 15}
+
+    @pytest.mark.asyncio
+    async def test_dispatches_xray_traffic(self, xray_traffic_env):
+        engine, user_id, _inactive_id, node, email = xray_traffic_env
+
+        await engine.ingest_node_traffic(node, {"xray_user_traffic": {email: 42}})
+
+        assert engine._traffic_buffer == {user_id: 42}
+
+    @pytest.mark.asyncio
+    async def test_empty_snapshot_is_a_noop(self, engine):
+        await engine.ingest_node_traffic(Node(id=1, name="n"), {})
+        assert engine._traffic_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_never_raises_even_if_a_sub_ingest_fails(self, engine, monkeypatch):
+        async def _boom(*a, **kw):
+            raise RuntimeError("db exploded")
+
+        monkeypatch.setattr(engine, "_ingest_amnezia_traffic", _boom)
+
+        # Must not raise.
+        await engine.ingest_node_traffic(
+            Node(id=1, name="n"), {"amnezia_peer_traffic": {"PUBKEY=": {"rx_bytes": 1, "tx_bytes": 1}}}
+        )
