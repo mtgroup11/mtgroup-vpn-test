@@ -90,15 +90,13 @@ async def lifespan(app: FastAPI):
         
     ai_engine = AnomalyPredictor()
 
-    # Auto-CDN / Smart SNI engine. Wired up deliberately even though its two
-    # health-check hooks (`_check_sni_health`, `_manage_auto_cdn`) are still
-    # `pass` stubs — the loop is a genuine no-op today, so starting it costs
-    # nothing and gets the lifecycle plumbing in place ahead of the
-    # implementation. NOTE for whoever implements those hooks: this currently
-    # starts unconditionally. Once it actually does something (Cloudflare API
-    # calls, SNI probing), gate it on `settings.CDN_ENABLED` so operators who
-    # haven't opted into CDN fronting don't silently get outbound traffic to
-    # Cloudflare on upgrade.
+    # Auto-CDN / Smart SNI engine. Its two hooks now do real work
+    # (_check_sni_health probes every active node's Reality SNI with a real
+    # TLS handshake; _manage_auto_cdn tests fallback Cloudflare candidates),
+    # so — per the standing instruction in CLAUDE.md — it's gated on
+    # `settings.CDN_ENABLED` rather than starting unconditionally the way it
+    # did while both hooks were still `pass` stubs. Operators who haven't
+    # opted into CDN fronting get none of this on a routine upgrade.
     autocdn_engine = SingularityAutoCDN(session_factory=db_session_factory)
 
     # Inject db_session_factory to orchestrator
@@ -111,7 +109,12 @@ async def lifespan(app: FastAPI):
     # db_session_factory injection above was the only wiring that existed,
     # so failed config pushes never actually retried and node health was
     # never polled in production; only tests exercised these loops.
-    tasks = [honeypot.start(), autocdn_engine.start(), orchestrator.start()]  # App-level decoy + Auto-CDN + Node Orchestrator always start
+    tasks = [honeypot.start(), orchestrator.start()]  # App-level decoy + Node Orchestrator always start
+    if getattr(settings, 'CDN_ENABLED', False):
+        tasks.append(autocdn_engine.start())
+        logging.info("CDN fronting enabled. Auto-CDN & Smart SNI engine started.")
+    else:
+        logging.info("CDN_ENABLED is false. Auto-CDN & Smart SNI engine bypassed.")
     if getattr(settings, 'EBPF_ENABLED', False):
         tasks.append(hopper_engine.start())
         tasks.append(ai_engine.start())
@@ -120,11 +123,13 @@ async def lifespan(app: FastAPI):
         logging.warning("eBPF Disabled. AI Detector and Port Hopper are fully bypassed to save resources.")
 
     await asyncio.gather(*tasks)
-    
+
     yield
-    
+
     logging.info(" Shutting down gracefully...")
-    stop_tasks = [honeypot.stop(), autocdn_engine.stop(), orchestrator.stop()]
+    stop_tasks = [honeypot.stop(), orchestrator.stop()]
+    if getattr(settings, 'CDN_ENABLED', False):
+        stop_tasks.append(autocdn_engine.stop())
     if getattr(settings, 'EBPF_ENABLED', False):
         stop_tasks.append(hopper_engine.stop())
         stop_tasks.append(ai_engine.stop())
