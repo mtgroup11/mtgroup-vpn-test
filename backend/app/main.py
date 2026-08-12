@@ -90,6 +90,14 @@ async def lifespan(app: FastAPI):
         
     ai_engine = AnomalyPredictor()
 
+    # XDP stats exporter. /run/mtgroup/xdp_stats.json (read by cli.py and
+    # the Telegram bot's eBPF panel) had no writer anywhere before this —
+    # both displays were permanently zero. Only meaningful alongside real
+    # eBPF, so gated the same way as hopper_engine/ai_engine below.
+    from backend.app.api.metrics import xdp_loader
+    from backend.app.core.xdp_stats_exporter import XDPStatsExporter
+    xdp_stats_exporter = XDPStatsExporter(xdp_loader)
+
     # Auto-CDN / Smart SNI engine. Its two hooks now do real work
     # (_check_sni_health probes every active node's Reality SNI with a real
     # TLS handshake; _manage_auto_cdn tests fallback Cloudflare candidates),
@@ -118,9 +126,10 @@ async def lifespan(app: FastAPI):
     if getattr(settings, 'EBPF_ENABLED', False):
         tasks.append(hopper_engine.start())
         tasks.append(ai_engine.start())
-        logging.info("AI Detector and Port Hopper engines started.")
+        tasks.append(xdp_stats_exporter.start())
+        logging.info("AI Detector, Port Hopper, and XDP stats exporter started.")
     else:
-        logging.warning("eBPF Disabled. AI Detector and Port Hopper are fully bypassed to save resources.")
+        logging.warning("eBPF Disabled. AI Detector, Port Hopper, and XDP stats exporter are fully bypassed to save resources.")
 
     await asyncio.gather(*tasks)
 
@@ -133,7 +142,8 @@ async def lifespan(app: FastAPI):
     if getattr(settings, 'EBPF_ENABLED', False):
         stop_tasks.append(hopper_engine.stop())
         stop_tasks.append(ai_engine.stop())
-        
+        stop_tasks.append(xdp_stats_exporter.stop())
+
     await asyncio.gather(*stop_tasks)
     
     if HAS_BCC and bpf_instance:
