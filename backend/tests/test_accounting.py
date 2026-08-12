@@ -74,10 +74,17 @@ class TestStartStop:
 
 @pytest_asyncio.fixture
 async def acct_engine(db_engine):
+    """
+    dry_run=False here: most tests using this fixture are specifically
+    verifying the enforcement path (suspension, node drops) works — the
+    dry_run=True *default* (safe-by-default, matching CLAUDE.md's
+    "never run successfully in production" caution) is covered
+    separately in TestDryRun below, against its own engine.
+    """
     from backend.app.models import create_session_factory
 
     factory = create_session_factory(db_engine)
-    return TrafficAccountingEngine(db_session_factory=factory), factory
+    return TrafficAccountingEngine(db_session_factory=factory, dry_run=False), factory
 
 
 class TestProcessAccounting:
@@ -356,6 +363,116 @@ class TestDropUserFromNodes:
 
         # Should not raise — errors are logged and swallowed.
         await engine._drop_user_from_nodes(user)
+
+
+@pytest_asyncio.fixture
+async def dry_run_engine(db_engine):
+    """The actual default: dry_run=True."""
+    from backend.app.models import create_session_factory
+
+    factory = create_session_factory(db_engine)
+    return TrafficAccountingEngine(db_session_factory=factory), factory
+
+
+class TestDryRun:
+    def test_dry_run_defaults_to_true(self, engine):
+        assert engine.dry_run is True
+
+    @pytest.mark.asyncio
+    async def test_over_quota_user_is_not_suspended_in_dry_run(self, dry_run_engine, caplog):
+        engine, factory = dry_run_engine
+
+        async with factory() as session:
+            user = User(
+                username="dryrun-over-limit",
+                hashed_password=hash_password("Pw123456!"),
+                data_limit_bytes=1000,
+                data_used_bytes=900,
+                is_active=True,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            user_id = user.id
+
+        await engine.ingest_traffic(user_id=user_id, bytes_delta=200)  # 900 + 200 >= 1000
+        await engine._process_accounting()
+
+        async with factory() as session:
+            refreshed = await session.get(User, user_id)
+            # Usage counters still update — dry-run only skips enforcement.
+            assert refreshed.data_used_bytes == 1100
+            assert refreshed.is_active is True
+        assert "DRY RUN" in caplog.text
+        assert "dryrun-over-limit" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_over_quota_user_does_not_get_dropped_from_nodes_in_dry_run(self, dry_run_engine, monkeypatch):
+        engine, factory = dry_run_engine
+        sync_mock = AsyncMock()
+        monkeypatch.setattr("backend.app.core.accounting.orchestrator.sync_node_config", sync_mock)
+
+        async with factory() as session:
+            user = User(
+                username="dryrun-no-drop",
+                hashed_password=hash_password("Pw123456!"),
+                data_limit_bytes=1000,
+                data_used_bytes=900,
+                is_active=True,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            user_id = user.id
+
+        await engine.ingest_traffic(user_id=user_id, bytes_delta=200)
+        await engine._process_accounting()
+
+        sync_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_over_quota_agent_is_not_suspended_in_dry_run(self, dry_run_engine, caplog):
+        engine, factory = dry_run_engine
+
+        async with factory() as session:
+            owner = User(
+                username="dryrun-agent-owner",
+                hashed_password=hash_password("Pw123456!"),
+            )
+            session.add(owner)
+            await session.commit()
+            await session.refresh(owner)
+
+            agent = Agent(
+                user_id=owner.id,
+                traffic_quota_bytes=1000,
+                traffic_used_bytes=1200,  # already over quota
+                is_active=True,
+            )
+            session.add(agent)
+            await session.commit()
+            await session.refresh(agent)
+
+            sub_user = User(
+                username="dryrun-agent-subuser",
+                hashed_password=hash_password("Pw123456!"),
+                agent_id=agent.id,
+                is_active=True,
+            )
+            session.add(sub_user)
+            await session.commit()
+            await session.refresh(sub_user)
+            sub_user_id, agent_id = sub_user.id, agent.id
+
+        await engine.ingest_traffic(user_id=sub_user_id, bytes_delta=1)
+        await engine._process_accounting()
+
+        async with factory() as session:
+            refreshed_agent = await session.get(Agent, agent_id)
+            refreshed_sub_user = await session.get(User, sub_user_id)
+            assert refreshed_agent.is_active is True
+            assert refreshed_sub_user.is_active is True
+        assert "DRY RUN" in caplog.text
 
 
 class TestConsumeDelta:

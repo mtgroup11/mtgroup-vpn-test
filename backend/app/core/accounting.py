@@ -31,12 +31,22 @@ class TrafficAccountingEngine:
     # `core/security.py`; this buffer was missed at the time.
     MAX_BUFFER_ENTRIES: int = 50_000
 
-    def __init__(self, db_session_factory: Callable[[], AsyncSession]):
+    def __init__(self, db_session_factory: Callable[[], AsyncSession], dry_run: bool = True):
         self._db_session_factory = db_session_factory
         self._is_running = False
         self._worker_task: asyncio.Task | None = None
         self._traffic_buffer: dict[int, int] = {}
         self._buffer_lock = asyncio.Lock()
+        # Safe-by-default: this engine has never run in production (see
+        # CLAUDE.md), so its first real cycle is also the first time
+        # anyone's quota is ever enforced. In dry-run mode, usage counters
+        # (data_used_bytes/current_period_usage_bytes) still update
+        # normally — that's just metering, useful regardless — but nobody
+        # actually gets suspended or dropped from nodes; over-quota users
+        # and agents are logged instead. Flip to False only once the
+        # existing usage data has been sanity-checked (CLAUDE.md has the
+        # query for this).
+        self.dry_run = dry_run
         # Last-seen CUMULATIVE byte counter per (node_id, identifier), used
         # by ingest_node_traffic() to compute deltas from the cumulative
         # counters nodes report. See _consume_delta().
@@ -227,33 +237,47 @@ class TrafficAccountingEngine:
                 suspended_users = result.scalars().all()
 
                 for user in suspended_users:
+                    if self.dry_run:
+                        logger.warning(
+                            "[DRY RUN] User %s (ID: %s) exceeded quota — would suspend "
+                            "and drop from nodes, but dry_run=True so no action taken.",
+                            user.username, user.id,
+                        )
+                        continue
                     logger.warning(
                         f"User {user.username} (ID: {user.id}) exceeded quota. Suspending."
                     )
                     user.is_active = False
                     # Trigger orchestrator to drop user from nodes
                     asyncio.create_task(self._drop_user_from_nodes(user))
-                        
+
                 # Commit user quota updates
                 await session.commit()
-                
+
                 # 3. Check for Reseller/Agent quotas
                 from backend.app.models import Agent
                 agent_stmt = select(Agent).where(Agent.is_active.is_(True), Agent.traffic_used_bytes >= Agent.traffic_quota_bytes)
                 over_quota_agents = (await session.execute(agent_stmt)).scalars().all()
-                
+
                 for agent in over_quota_agents:
+                    if self.dry_run:
+                        logger.warning(
+                            "[DRY RUN] Agent %s exceeded quota — would suspend agent and "
+                            "all sub-users, but dry_run=True so no action taken.",
+                            agent.agent_code,
+                        )
+                        continue
                     logger.warning(f"Agent {agent.agent_code} exceeded quota. Suspending agent and all sub-users.")
                     agent.is_active = False
-                    
+
                     # Fetch all users associated directly or indirectly with this agent
                     users_stmt = select(User).where(User.agent_id == agent.id, User.is_active.is_(True))
                     agent_users = (await session.execute(users_stmt)).scalars().all()
-                    
+
                     for user in agent_users:
                         user.is_active = False
                         asyncio.create_task(self._drop_user_from_nodes(user))
-                        
+
                 await session.commit()
 
         except Exception as e:
