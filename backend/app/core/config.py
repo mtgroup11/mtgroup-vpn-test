@@ -67,6 +67,26 @@ class Settings(BaseSettings):
     CDN_WORKER_URL: str = ""
     CDN_ENABLED: bool = False
 
+    # ── SNI Multiplexer / Active-Probe Deflection ─────────────────────────
+    # Fronts :443 with a real TLS ClientHello-SNI router (core/routing_engine.py).
+    # No backend routes are pre-registered here — everything that reaches it
+    # falls through to DECOY_REVERSE_PROXY_TARGET, i.e. it behaves as a
+    # probe-deflection façade on :443, not a live traffic router. The panel
+    # API itself listens on SNI_MULTIPLEXER_API_PORT (loopback-friendly),
+    # never on :443 directly. Off by default: operators must opt in.
+    SNI_MULTIPLEXER_ENABLED: bool = False
+    SNI_MULTIPLEXER_PORT: int = 443
+    SNI_MULTIPLEXER_API_PORT: int = 8443
+
+    # ── Traffic Accounting / Quota Enforcement ────────────────────────────
+    # Suspends users/agents over data_limit_bytes and pushes drop commands
+    # to nodes (core/accounting.py). Off by default: operators must opt in
+    # after auditing existing data_used_bytes/data_limit_bytes values (see
+    # CLAUDE.md). Once enabled it runs live (dry_run=False) — no separate
+    # flag for that, since a flag left permanently in observe-only mode
+    # enforces nothing.
+    ACCOUNTING_ENABLED: bool = False
+
     # ── Subscription Defaults ────────────────────────────────────────────
     DEFAULT_PROTOCOLS: str = "vless_reality,hysteria2"
     DEFAULT_SNI: str = "www.google.com"

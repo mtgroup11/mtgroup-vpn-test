@@ -13,6 +13,8 @@ from backend.app.core.honeypot import honeypot
 from backend.app.generators.port_hopper import AsyncPortHoppingEngine
 from backend.app.core.ai_detector import AnomalyPredictor
 from backend.app.core.auto_cdn import SingularityAutoCDN
+from backend.app.core.routing_engine import SNIMultiplexer
+from backend.app.core.accounting import TrafficAccountingEngine
 from backend.app.orchestrator import orchestrator
 from backend.app.models import create_db_engine, create_session_factory, init_db
 from backend.app.api.auth import get_db
@@ -107,6 +109,24 @@ async def lifespan(app: FastAPI):
     # opted into CDN fronting get none of this on a routine upgrade.
     autocdn_engine = SingularityAutoCDN(session_factory=db_session_factory)
 
+    # SNI Multiplexer / active-probe deflection. No backend routes are
+    # registered here on purpose — see the SNI_MULTIPLEXER_ENABLED comment
+    # in core/config.py. With no routes, every connection that reaches it
+    # falls through to the decoy reverse proxy, i.e. it's a probe-deflection
+    # façade on :443, not a live traffic router yet.
+    sni_mux = SNIMultiplexer(
+        listen_port=settings.SNI_MULTIPLEXER_PORT,
+        decoy_target=settings.DECOY_REVERSE_PROXY_TARGET,
+    )
+
+    # Traffic accounting / quota enforcement. Runs live (dry_run=False) —
+    # see the ACCOUNTING_ENABLED comment in core/config.py for the
+    # audit-before-enabling checklist.
+    accounting_engine = TrafficAccountingEngine(
+        db_session_factory=db_session_factory, dry_run=False
+    )
+    orchestrator.set_accounting_engine(accounting_engine)
+
     # Inject db_session_factory to orchestrator
     orchestrator._db_session_factory = db_session_factory
 
@@ -123,6 +143,16 @@ async def lifespan(app: FastAPI):
         logging.info("CDN fronting enabled. Auto-CDN & Smart SNI engine started.")
     else:
         logging.info("CDN_ENABLED is false. Auto-CDN & Smart SNI engine bypassed.")
+    if getattr(settings, 'SNI_MULTIPLEXER_ENABLED', False):
+        tasks.append(sni_mux.start())
+        logging.info("SNI_MULTIPLEXER_ENABLED. SNI multiplexer / probe deflection started on :%s.", settings.SNI_MULTIPLEXER_PORT)
+    else:
+        logging.info("SNI_MULTIPLEXER_ENABLED is false. SNI multiplexer bypassed.")
+    if getattr(settings, 'ACCOUNTING_ENABLED', False):
+        tasks.append(accounting_engine.start())
+        logging.info("ACCOUNTING_ENABLED. Traffic accounting engine started LIVE (dry_run=False) — over-quota users/agents will be suspended.")
+    else:
+        logging.info("ACCOUNTING_ENABLED is false. Traffic accounting engine bypassed.")
     if getattr(settings, 'EBPF_ENABLED', False):
         tasks.append(hopper_engine.start())
         tasks.append(ai_engine.start())
@@ -139,6 +169,10 @@ async def lifespan(app: FastAPI):
     stop_tasks = [honeypot.stop(), orchestrator.stop()]
     if getattr(settings, 'CDN_ENABLED', False):
         stop_tasks.append(autocdn_engine.stop())
+    if getattr(settings, 'SNI_MULTIPLEXER_ENABLED', False):
+        stop_tasks.append(sni_mux.stop())
+    if getattr(settings, 'ACCOUNTING_ENABLED', False):
+        stop_tasks.append(accounting_engine.stop())
     if getattr(settings, 'EBPF_ENABLED', False):
         stop_tasks.append(hopper_engine.stop())
         stop_tasks.append(ai_engine.stop())
