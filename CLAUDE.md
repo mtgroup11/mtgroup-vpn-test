@@ -26,7 +26,7 @@ pytest backend/tests/ --asyncio-mode=auto --cov=backend --cov-report=term-missin
 
 # eBPF-specific tests / Telegram bot tests (run separately in CI)
 pytest backend/tests/test_ebpf.py -v --asyncio-mode=auto
-pytest telegram_bot/tests_bot.py -v --asyncio-mode=auto   # currently has a pre-existing relative-import failure
+pytest telegram_bot/tests_bot.py -v --asyncio-mode=auto
 
 # Lint / type-check (mirrors CI; mypy is non-blocking there)
 ruff check backend/ telegram_bot/ --ignore E501
