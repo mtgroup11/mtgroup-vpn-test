@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     SNI_MULTIPLEXER_ENABLED: bool = False
     SNI_MULTIPLEXER_PORT: int = 443
     SNI_MULTIPLEXER_API_PORT: int = 8443
+    # How often (seconds) the mux's backend routes are re-synced against
+    # active nodes in the DB, so added/removed/renamed nodes get picked up
+    # without a restart.
+    SNI_MUX_SYNC_INTERVAL_SEC: int = 60
 
     # ── Traffic Accounting / Quota Enforcement ────────────────────────────
     # Suspends users/agents over data_limit_bytes and pushes drop commands

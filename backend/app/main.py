@@ -1,3 +1,4 @@
+import contextlib
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request
@@ -109,15 +110,58 @@ async def lifespan(app: FastAPI):
     # opted into CDN fronting get none of this on a routine upgrade.
     autocdn_engine = SingularityAutoCDN(session_factory=db_session_factory)
 
-    # SNI Multiplexer / active-probe deflection. No backend routes are
-    # registered here on purpose — see the SNI_MULTIPLEXER_ENABLED comment
-    # in core/config.py. With no routes, every connection that reaches it
-    # falls through to the decoy reverse proxy, i.e. it's a probe-deflection
-    # façade on :443, not a live traffic router yet.
+    # SNI Multiplexer / active-probe deflection. Backend routes are
+    # registered from the DB's active nodes (node.sni -> node.address:port)
+    # so a matching ClientHello SNI is forwarded straight to that node
+    # instead of falling through to the decoy — see _sni_mux_sync_loop
+    # below, which also re-syncs periodically so added/removed/renamed
+    # nodes are picked up without a restart.
     sni_mux = SNIMultiplexer(
         listen_port=settings.SNI_MULTIPLEXER_PORT,
         decoy_target=settings.DECOY_REVERSE_PROXY_TARGET,
     )
+
+    async def _sni_mux_sync_loop():
+        """Keep the mux's backend routes in sync with active nodes.
+
+        Runs once immediately (so routes exist before the first connection
+        arrives) and then every SNI_MUX_SYNC_INTERVAL_SEC. Nodes without a
+        `sni` set are skipped — there's nothing to route on.
+        """
+        from sqlalchemy import select as _select
+        from backend.app.models import Node as _Node
+
+        known_patterns: set[str] = set()
+        while True:
+            try:
+                async with db_session_factory() as session:
+                    result = await session.execute(
+                        _select(_Node).where(_Node.is_active)
+                    )
+                    nodes = list(result.scalars().all())
+
+                current_patterns: set[str] = set()
+                for node in nodes:
+                    if not node.sni:
+                        continue
+                    current_patterns.add(node.sni)
+                    await sni_mux.add_backend(
+                        sni_pattern=node.sni,
+                        backend_host=node.address,
+                        backend_port=node.port,
+                        protocol_tag=node.protocol.value if node.protocol else "vless-reality",
+                    )
+
+                for stale_pattern in known_patterns - current_patterns:
+                    await sni_mux.remove_backend(stale_pattern)
+
+                known_patterns = current_patterns
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("SNI multiplexer node-route sync failed; will retry next cycle.")
+
+            await asyncio.sleep(getattr(settings, "SNI_MUX_SYNC_INTERVAL_SEC", 60))
 
     # Traffic accounting / quota enforcement. Runs live (dry_run=False) —
     # see the ACCOUNTING_ENABLED comment in core/config.py for the
@@ -143,8 +187,13 @@ async def lifespan(app: FastAPI):
         logging.info("CDN fronting enabled. Auto-CDN & Smart SNI engine started.")
     else:
         logging.info("CDN_ENABLED is false. Auto-CDN & Smart SNI engine bypassed.")
+    sni_mux_sync_task = None
     if getattr(settings, 'SNI_MULTIPLEXER_ENABLED', False):
         tasks.append(sni_mux.start())
+        # _sni_mux_sync_loop() runs forever, so it's backgrounded via
+        # create_task rather than placed in `tasks` (which is awaited via
+        # asyncio.gather below and would block startup forever otherwise).
+        sni_mux_sync_task = asyncio.create_task(_sni_mux_sync_loop())
         logging.info("SNI_MULTIPLEXER_ENABLED. SNI multiplexer / probe deflection started on :%s.", settings.SNI_MULTIPLEXER_PORT)
     else:
         logging.info("SNI_MULTIPLEXER_ENABLED is false. SNI multiplexer bypassed.")
@@ -170,6 +219,10 @@ async def lifespan(app: FastAPI):
     if getattr(settings, 'CDN_ENABLED', False):
         stop_tasks.append(autocdn_engine.stop())
     if getattr(settings, 'SNI_MULTIPLEXER_ENABLED', False):
+        if sni_mux_sync_task is not None:
+            sni_mux_sync_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sni_mux_sync_task
         stop_tasks.append(sni_mux.stop())
     if getattr(settings, 'ACCOUNTING_ENABLED', False):
         stop_tasks.append(accounting_engine.stop())

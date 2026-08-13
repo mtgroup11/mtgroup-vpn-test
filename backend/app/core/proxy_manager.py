@@ -44,7 +44,15 @@ class ProxyManager:
             logger.error(f"Failed to generate Reality keypair: {e}")
             raise
 
-    def build_vless_reality_config(self, port: int, uuid: str, sni_dest: str = "www.microsoft.com:443", server_names: List[str] = None) -> Dict[str, Any]:
+    def build_vless_reality_config(
+        self,
+        port: int,
+        uuid: str,
+        sni_dest: str = "www.microsoft.com:443",
+        server_names: List[str] = None,
+        private_key: str = None,
+        clients: List[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         Builds a dynamic JSON configuration for Xray-core utilizing VLESS and XTLS-Reality.
 
@@ -57,11 +65,31 @@ class ProxyManager:
         to the client's `uuid` here since that's the only identifier this
         function receives; callers that pass a different identifier as
         `uuid` get that identifier back out of the stats query too.
+
+        `private_key`: reuse an already-established Reality private key
+        (e.g. `Node.reality_private_key`) instead of generating a fresh
+        one. This matters because every client link handed out references
+        the server's *public* key (`Node.reality_public_key`) — silently
+        minting a new keypair on every config build would leave every
+        already-distributed client config pointing at a public key the
+        server no longer holds, breaking every existing user's connection.
+        Only pass `None` (generate fresh) for a node that has never been
+        provisioned before.
+
+        `clients`: full list of `{"uuid": ..., "email": ...}` dicts for a
+        multi-user server config. Defaults to a single-client list built
+        from `uuid` for backward compatibility with single-user callers.
         """
         if server_names is None:
             server_names = ["www.microsoft.com"]
 
-        keys = self.generate_reality_keypair()
+        if private_key:
+            keys = {"privateKey": private_key}
+        else:
+            keys = self.generate_reality_keypair()
+
+        if clients is None:
+            clients = [{"uuid": uuid, "email": uuid}]
 
         config = {
             "log": {
@@ -98,10 +126,11 @@ class ProxyManager:
                     "settings": {
                         "clients": [
                             {
-                                "id": uuid,
-                                "email": uuid,
+                                "id": client["uuid"],
+                                "email": client["email"],
                                 "flow": "xtls-rprx-vision"
                             }
+                            for client in clients
                         ],
                         "decryption": "none"
                     },

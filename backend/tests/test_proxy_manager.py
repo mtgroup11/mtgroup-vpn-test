@@ -96,6 +96,34 @@ class TestBuildVlessRealityConfig:
         assert rule["inboundTag"] == ["api"]
         assert rule["outboundTag"] == "api"
 
+    def test_reuses_an_existing_private_key_instead_of_generating_one(self, manager):
+        # A fresh keypair on every call would silently invalidate every
+        # already-distributed client config, which references the
+        # server's public key half.
+        config = manager.build_vless_reality_config(
+            port=443, uuid="u", private_key="existing-private-key",
+        )
+        reality = _vless_inbound(config)["streamSettings"]["realitySettings"]
+        assert reality["privateKey"] == "existing-private-key"
+
+    def test_generates_a_key_when_none_is_provided(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u")
+        reality = _vless_inbound(config)["streamSettings"]["realitySettings"]
+        assert reality["privateKey"]
+
+    def test_builds_a_multi_client_config(self, manager):
+        clients = [
+            {"uuid": "uuid-1", "email": "uuid-1"},
+            {"uuid": "uuid-2", "email": "uuid-2"},
+        ]
+        config = manager.build_vless_reality_config(
+            port=443, uuid="unused", clients=clients,
+        )
+        result_clients = _vless_inbound(config)["settings"]["clients"]
+        assert len(result_clients) == 2
+        assert {c["id"] for c in result_clients} == {"uuid-1", "uuid-2"}
+        assert {c["email"] for c in result_clients} == {"uuid-1", "uuid-2"}
+
 
 class TestDeployConfig:
     @pytest.mark.asyncio
