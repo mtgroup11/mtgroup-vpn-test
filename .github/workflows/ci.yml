@@ -48,12 +48,7 @@ jobs:
 
       - name: Run API tests
         run: |
-          set +e
-          pytest backend/tests/ -v --asyncio-mode=auto --tb=long -x > /tmp/pytest_out.log 2>&1
-          code=$?
-          set -e
-          awk '/^_+ ERROR|^E   |Traceback|Error:|Exception/{p=1} p' /tmp/pytest_out.log | head -c 3000 | while IFS= read -r line; do echo "::error::$line"; done
-          exit $code
+          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x
 
       - name: Run eBPF tests
         run: |
