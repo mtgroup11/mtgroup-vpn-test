@@ -280,3 +280,44 @@ class TestDashboard:
         assert resp.status_code == 200
         assert resp.json()["risk_score"] > 75
         shield_mock.assert_awaited_once_with(resp.json()["risk_score"])
+
+    @pytest.mark.asyncio
+    async def test_includes_real_active_node_load(self, client, db_session, seed_node):
+        # TrafficGraph on the frontend renders exactly this shape — real
+        # DB-backed load, not fabricated, per health-poll-populated
+        # current_connections/max_connections/health_status. `client`
+        # already seeds one default active node ("test-node"); seed_node
+        # adds a second ("test-node-1") with values set below.
+        seed_node.current_connections = 45
+        seed_node.max_connections = 90
+        seed_node.health_status = "healthy"
+        await db_session.commit()
+
+        resp = await client.get("/api/metrics/dashboard")
+        assert resp.status_code == 200
+        nodes = {n["name"]: n for n in resp.json()["nodes"]}
+        assert nodes["test-node-1"] == {
+            "name": "test-node-1", "traffic": "45 conns", "percent": 50, "color": "emerald"
+        }
+
+    @pytest.mark.asyncio
+    async def test_unlimited_node_capacity_reports_zero_percent_not_a_crash(self, client, db_session, seed_node):
+        seed_node.current_connections = 10
+        seed_node.max_connections = 0  # 0 = unlimited on this node
+        await db_session.commit()
+
+        resp = await client.get("/api/metrics/dashboard")
+        assert resp.status_code == 200
+        nodes = {n["name"]: n for n in resp.json()["nodes"]}
+        assert nodes["test-node-1"]["percent"] == 0
+
+    @pytest.mark.asyncio
+    async def test_inactive_nodes_excluded_from_load_list(self, client, db_session, seed_node):
+        seed_node.is_active = False
+        await db_session.commit()
+
+        resp = await client.get("/api/metrics/dashboard")
+        assert resp.status_code == 200
+        names = {n["name"] for n in resp.json()["nodes"]}
+        assert "test-node-1" not in names
+        assert "test-node" in names  # the always-active default node stays

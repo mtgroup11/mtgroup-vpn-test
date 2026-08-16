@@ -2,6 +2,7 @@
 /* eslint-disable */
 'use client';
 import React, { useState, useEffect } from 'react';
+import TrafficGraph from '@/components/TrafficGraph';
 
 // Utilities
 const generateIP = () => `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
@@ -20,7 +21,8 @@ export default function NOCDashboard() {
       { time: "10:39", action: "HONEYPOT_TRIGGER", details: "Active probe blocked" },
     ],
     ebpf_status: "Online",
-    active_users: 142
+    active_users: 142,
+    nodes: [] as { name: string; traffic: string; percent: number; color: string }[]
   });
 
   // Toggles state
@@ -154,20 +156,8 @@ export default function NOCDashboard() {
                <div className={`text-6xl font-black mb-2 transition-colors duration-500 ${combatMode ? 'text-rose-400' : 'text-emerald-400'}`}>{metrics.connection_quality}</div>
                <div className="text-xs text-zinc-500 uppercase tracking-widest">Excellence Score</div>
             </div>
-            <div className="flex-2 flex flex-col justify-between w-full md:w-2/3 gap-2">
-              {[
-                { name: 'Germany-Core', status: combatMode ? 'Degraded' : 'Optimal', ping: combatMode ? '85ms' : '24ms' },
-                { name: 'Netherlands-Relay', status: 'Optimal', ping: '31ms' },
-                { name: 'TR-Edge', status: combatMode ? 'Under Attack' : 'Optimal', ping: combatMode ? '142ms' : '15ms' }
-              ].map((node, i) => (
-                <div key={i} className="flex justify-between items-center p-3 bg-zinc-800/30 rounded-lg text-sm transition-colors duration-300">
-                  <span className="font-semibold text-zinc-300">{node.name}</span>
-                  <div className="flex gap-4">
-                    <span className={node.status === 'Optimal' ? 'text-emerald-400' : 'text-rose-400'}>{node.status}</span>
-                    <span className="text-zinc-500 font-mono">{node.ping}</span>
-                  </div>
-                </div>
-              ))}
+            <div className="flex-2 w-full md:w-2/3">
+              <TrafficGraph nodes={metrics.nodes} />
             </div>
           </div>
         </BentoBox>

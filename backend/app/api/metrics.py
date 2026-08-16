@@ -8,10 +8,14 @@ drop statistics for the HTML5 Canvas Radar UI.
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 import psutil
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.auth import get_db
 from backend.app.ebpf.loader import XDPLoader
+from backend.app.models import Node
 
 logger = logging.getLogger("mtgroup.api.metrics")
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
@@ -211,14 +215,43 @@ async def trigger_autonomous_shield(risk_score: int):
     )
 
 
+def _node_color(health_status: str) -> str:
+    if health_status == "healthy":
+        return "emerald"
+    if health_status == "offline":
+        return "gray"
+    return "amber"
+
+
 @router.get("/dashboard")
-async def get_metrics_dashboard():
+async def get_metrics_dashboard(db: AsyncSession = Depends(get_db)):
     """
     Endpoint: /api/metrics/dashboard
-    Returns durational awareness data for the Next.js frontend, 
+    Returns durational awareness data for the Next.js frontend,
     driven by real system telemetry and eBPF kernel maps.
     """
     from datetime import datetime, timezone
+
+    # Real per-node connection load. current_connections/health_status are
+    # populated by NodeOrchestrator.check_node_health()'s health-poll loop
+    # (orchestrator.py) — not fabricated here.
+    result = await db.execute(select(Node).where(Node.is_active))
+    nodes = [
+        {
+            "name": node.name,
+            "traffic": f"{node.current_connections} conns",
+            "percent": (
+                # max_connections == 0 means unlimited on this node — no
+                # denominator to show load against, so 0% rather than a
+                # division by zero.
+                min(100, round(node.current_connections / node.max_connections * 100))
+                if node.max_connections > 0
+                else 0
+            ),
+            "color": _node_color(node.health_status),
+        }
+        for node in result.scalars().all()
+    ]
 
     # 1. Real eBPF Telemetry
     xdp_stats = xdp_loader.get_stats()
@@ -278,5 +311,6 @@ async def get_metrics_dashboard():
             }
         ],
         "ebpf_status": ebpf_status,
-        "active_users": active_users
+        "active_users": active_users,
+        "nodes": nodes,
     }
