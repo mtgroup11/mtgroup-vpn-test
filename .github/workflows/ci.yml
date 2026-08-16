@@ -38,6 +38,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
+          ruff check backend/ telegram_bot/ agent/ --ignore E501 --output-format=github
           ruff check backend/ telegram_bot/ agent/ --ignore E501
 
       - name: Type check with mypy
