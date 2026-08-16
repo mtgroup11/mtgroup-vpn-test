@@ -48,7 +48,12 @@ jobs:
 
       - name: Run API tests
         run: |
-          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x
+          set +e
+          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x > /tmp/pytest_out.log 2>&1
+          code=$?
+          set -e
+          tail -c 3000 /tmp/pytest_out.log | while IFS= read -r line; do echo "::error::$line"; done
+          exit $code
 
       - name: Run eBPF tests
         run: |
