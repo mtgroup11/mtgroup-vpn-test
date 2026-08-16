@@ -9,6 +9,9 @@ still exercise the exact code paths CI (ubuntu-latest) would hit.
 
 from __future__ import annotations
 
+import struct
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -169,3 +172,85 @@ class TestPeerAllowed:
         with patch.object(helper.socket, "SO_PEERCRED", None, create=True):
             with patch("backend.app.privileged_helper_daemon.hasattr", side_effect=lambda o, n: False if n == "SO_PEERCRED" else hasattr(o, n)):
                 assert helper._peer_allowed(writer=object()) is True
+
+
+class TestPeerAllowedSoPeercred:
+    """Exercises the real Linux SO_PEERCRED credential-check path — this
+    daemon is the whole privilege boundary between the unprivileged panel
+    process and root, so an untested access-control path here is worse
+    than untested elsewhere. `pwd`/`grp` are POSIX-only stdlib modules
+    (imported locally inside `_peer_allowed`, so patching sys.modules
+    before the call is what makes this portable to non-Linux dev/CI
+    hosts) and SO_PEERCRED's struct layout (3 native ints: pid, uid, gid)
+    is faked via a fake socket object rather than a real one.
+    """
+
+    class _FakeSocket:
+        def __init__(self, peercred_bytes):
+            self._peercred_bytes = peercred_bytes
+
+        def getsockopt(self, level, optname, buflen):
+            return self._peercred_bytes
+
+    @staticmethod
+    def _peercred_bytes(pid: int, uid: int, gid: int) -> bytes:
+        return struct.pack("3i", pid, uid, gid)
+
+    @staticmethod
+    def _fake_writer(sock):
+        writer = SimpleNamespace()
+        writer.get_extra_info = lambda key: sock if key == "socket" else None
+        return writer
+
+    @pytest.fixture(autouse=True)
+    def _has_so_peercred(self):
+        with patch.object(helper.socket, "SO_PEERCRED", 17, create=True):
+            yield
+
+    @pytest.fixture
+    def fake_pwd_grp(self, monkeypatch):
+        """Registers fake pwd/grp modules so `import pwd`/`import grp`
+        inside _peer_allowed resolve to these instead of failing on
+        non-POSIX hosts."""
+        pwd_module = ModuleType("pwd")
+        grp_module = ModuleType("grp")
+        pwd_module.getpwnam = lambda name: SimpleNamespace(pw_uid=1000)
+        grp_module.getgrnam = lambda name: SimpleNamespace(gr_gid=2000)
+        monkeypatch.setitem(sys.modules, "pwd", pwd_module)
+        monkeypatch.setitem(sys.modules, "grp", grp_module)
+        return pwd_module, grp_module
+
+    def test_allows_when_uid_matches(self, fake_pwd_grp):
+        sock = self._FakeSocket(self._peercred_bytes(pid=1, uid=1000, gid=9999))
+        assert helper._peer_allowed(self._fake_writer(sock)) is True
+
+    def test_allows_when_gid_matches_even_if_uid_does_not(self, fake_pwd_grp):
+        sock = self._FakeSocket(self._peercred_bytes(pid=1, uid=9999, gid=2000))
+        assert helper._peer_allowed(self._fake_writer(sock)) is True
+
+    def test_rejects_when_neither_uid_nor_gid_matches(self, fake_pwd_grp):
+        sock = self._FakeSocket(self._peercred_bytes(pid=1, uid=9999, gid=9999))
+        assert helper._peer_allowed(self._fake_writer(sock)) is False
+
+    def test_rejects_when_socket_is_unavailable(self):
+        writer = SimpleNamespace()
+        writer.get_extra_info = lambda key: None
+        assert helper._peer_allowed(writer) is False
+
+    def test_rejects_and_does_not_crash_on_unknown_panel_user(self, monkeypatch):
+        """PANEL_USER/PANEL_GROUP misconfigured (e.g. the daemon deployed
+        before the mtgroup system user was created) must fail closed, not
+        raise out of the connection handler."""
+        pwd_module = ModuleType("pwd")
+        grp_module = ModuleType("grp")
+
+        def _raise_keyerror(name):
+            raise KeyError(name)
+
+        pwd_module.getpwnam = _raise_keyerror
+        grp_module.getgrnam = lambda name: SimpleNamespace(gr_gid=2000)
+        monkeypatch.setitem(sys.modules, "pwd", pwd_module)
+        monkeypatch.setitem(sys.modules, "grp", grp_module)
+
+        sock = self._FakeSocket(self._peercred_bytes(pid=1, uid=1000, gid=2000))
+        assert helper._peer_allowed(self._fake_writer(sock)) is False
