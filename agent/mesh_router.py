@@ -166,7 +166,7 @@ class MeshRouter:
             if peer_id not in self._active_tunnels:
                 try:
                     # Establish encrypted overlay tunnel (using TLS in production)
-                    reader, writer = await asyncio.open_connection(address, overlay_port)
+                    _reader, writer = await asyncio.open_connection(address, overlay_port)
                     self._active_tunnels[peer_id] = writer
                     logger.info(f"Established Overlay Tunnel to Peer {peer_id} at {address}:{overlay_port}")
                 except Exception as e:

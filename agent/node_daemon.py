@@ -62,8 +62,8 @@ import subprocess
 import tempfile
 import time
 
-from aiohttp import web
 import psutil
+from aiohttp import web
 
 from agent import watchdog_client
 
@@ -397,7 +397,7 @@ async def restart_service(service_name: str):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await process.communicate()
+        _stdout, stderr = await process.communicate()
         if process.returncode != 0:
             logger.error(f"Failed to restart {service_name}: {stderr.decode()}")
         else:
