@@ -8,8 +8,9 @@ exceeds 85% or packet loss > 5%.
 
 import asyncio
 import logging
+from typing import Any
+
 import psutil
-from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger("mtgroup.agent.mesh")
 
@@ -26,14 +27,14 @@ class MeshRouter:
     """
 
     def __init__(self):
-        self.peers: List[Dict[str, Any]] = []
+        self.peers: list[dict[str, Any]] = []
         self._is_running = False
         self._worker_task: asyncio.Task | None = None
-        self._active_tunnels: Dict[int, asyncio.StreamWriter] = {}
-        self._last_tcp_counters: Optional[Tuple[int, int]] = None
+        self._active_tunnels: dict[int, asyncio.StreamWriter] = {}
+        self._last_tcp_counters: tuple[int, int] | None = None
         self._packet_loss_unavailable_warned = False
 
-    def update_peers(self, new_peers: List[Dict[str, Any]]):
+    def update_peers(self, new_peers: list[dict[str, Any]]):
         """Called by the agent HTTP server when Orchestrator pushes peers."""
         self.peers = new_peers
         logger.info(f"MeshRouter updated with {len(self.peers)} peers.")
@@ -88,7 +89,7 @@ class MeshRouter:
                 await asyncio.sleep(5.0)
 
     @staticmethod
-    def _read_tcp_retrans_counters() -> Optional[Tuple[int, int]]:
+    def _read_tcp_retrans_counters() -> tuple[int, int] | None:
         """Reads cumulative (RetransSegs, OutSegs) from /proc/net/snmp.
         Returns None on any platform/format where this isn't available
         (e.g. non-Linux) rather than raising — callers must treat that
