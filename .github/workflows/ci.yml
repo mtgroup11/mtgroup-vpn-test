@@ -10,6 +10,7 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
 
@@ -47,7 +48,16 @@ jobs:
 
       - name: Run API tests
         run: |
-          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x
+          # TEMP DIAGNOSTIC (2026-08-13): this step fails with pytest exit
+          # code 4 (usage error) on the 3.12 leg only; job log downloads
+          # 403 without repo admin rights, so surface the real output as a
+          # workflow annotation instead. Revert once the cause is found.
+          set +e
+          pytest backend/tests/ -v --asyncio-mode=auto --tb=short -x > /tmp/pytest_out.log 2>&1
+          code=$?
+          set -e
+          tail -c 3000 /tmp/pytest_out.log | while IFS= read -r line; do echo "::error::$line"; done
+          exit $code
 
       - name: Run eBPF tests
         run: |
