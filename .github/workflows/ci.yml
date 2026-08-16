@@ -38,6 +38,15 @@ jobs:
 
       - name: Lint with ruff
         run: |
+          # TEMP DIAGNOSTIC (2026-08-13): this step has failed on every
+          # commit for 3+ days, but an identical local run against a fresh
+          # clone passes cleanly, and job log downloads 403 without repo
+          # admin rights. --output-format=github surfaces the actual
+          # finding as a workflow annotation (visible via the checks API
+          # without needing log-download permissions) instead of only a
+          # pass/fail. Revert to the single plain invocation once the
+          # cause is found.
+          ruff check backend/ telegram_bot/ agent/ --ignore E501 --output-format=github
           ruff check backend/ telegram_bot/ agent/ --ignore E501
 
       - name: Type check with mypy
