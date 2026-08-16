@@ -74,6 +74,23 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      # vpn-backend runs with network_mode: host (see its own comment
+      # above), so it isn't reachable via Docker's internal service-name
+      # DNS the way a normal bridge-networked service would be — it's
+      # only reachable via the host's own network. host.docker.internal
+      # + extra_hosts below is the standard way to reach the host from a
+      # bridge-networked container on Linux (Docker Desktop already
+      # provides this DNS name; extra_hosts is what makes it resolve on
+      # native Linux Docker too, since Compose v20.10+).
+      # Dockerfile's CMD actually binds uvicorn to :8000 (EXPOSE 8000),
+      # despite CLAUDE.md's "run locally" example using :8443 — a
+      # pre-existing inconsistency, not something introduced here.
+      # Override BACKEND_INTERNAL_URL if your deployment's backend
+      # actually listens elsewhere.
+      - BACKEND_INTERNAL_URL=http://host.docker.internal:8000
+      - STEALTH_TOKEN=${STEALTH_TOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - vpn-backend
 

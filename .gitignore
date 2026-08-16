@@ -166,3 +166,15 @@ test_output.txt
 # Temporary directories
 scratch/
 tmp/
+
+# -----------------------------------
+# Frontend (Next.js) — never had Node
+# entries before; node_modules/.next
+# were showing as untracked instead
+# of ignored.
+# -----------------------------------
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+frontend/.env
+frontend/.env.local
