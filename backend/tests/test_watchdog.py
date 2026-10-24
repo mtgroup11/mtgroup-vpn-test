@@ -233,3 +233,17 @@ class TestExecuteRollback:
         commands = [call.args[0] for call in run_mock.call_args_list]
         assert ["iptables", "-P", "INPUT", "ACCEPT"] not in commands
         assert ["iptables", "-F"] not in commands
+
+
+def test_import_has_no_filesystem_side_effects(monkeypatch):
+    """Importing the module must not create /var/log/mtgroup (a
+    PermissionError for non-root — this failed every CI run) or hijack the
+    root logger; that only happens when it runs as the service."""
+    import importlib
+    import os
+
+    def _refuse(*a, **kw):
+        raise PermissionError("no writing at import time")
+
+    monkeypatch.setattr(os, "makedirs", _refuse)
+    importlib.reload(wd)  # must not raise

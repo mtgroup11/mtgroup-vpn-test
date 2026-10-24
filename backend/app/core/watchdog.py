@@ -20,13 +20,22 @@ AWG_BAK = os.path.join(SNAPSHOT_DIR, "awg0_config.conf.bak")
 AWG_TARGET = "/etc/amnezia/amneziawg/awg0.conf"
 TIMEOUT_SECONDS = 60
 
-# Setup logging
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+
+def setup_logging() -> None:
+    """Log to LOG_FILE. Only called when running as the watchdog service.
+
+    This used to run at import time: importing the module (as the test
+    suite does) tried to create /var/log/mtgroup — a PermissionError for any
+    non-root user, which is why CI failed on every push — and its
+    basicConfig() would also have redirected the importing process's root
+    logger into the watchdog's file.
+    """
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
 def get_secret():
     try:
@@ -229,5 +238,6 @@ class Watchdog:
                 os.remove(SOCK_FILE)
 
 if __name__ == "__main__":
+    setup_logging()
     wd = Watchdog()
     wd.run()
