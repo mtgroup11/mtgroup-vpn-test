@@ -477,6 +477,20 @@ class Node(Base):
         default=lambda: uuid.uuid4().hex,
     )
 
+    # Node agent (agent/node_daemon.py) endpoint. Separate from `port`,
+    # which is the *VPN* port clients connect to — the orchestrator used to
+    # send its signed HTTPS requests to `port`, i.e. to Xray/AmneziaWG
+    # (UDP!), so every health check failed.
+    agent_port: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=8443, server_default="8443",
+    )
+    # The agent's self-signed TLS certificate (PEM). The orchestrator trusts
+    # exactly this certificate for this node — pinned, so an on-path
+    # attacker (the threat model here is a national ISP) can't read config
+    # pushes, which carry the Reality private key. Pasted by the admin from
+    # the agent's install output, or recorded on first contact (TOFU).
+    agent_cert_pem: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+
     # REALITY specific fields
     reality_public_key: Mapped[Optional[str]] = mapped_column(
         String(256), nullable=True
@@ -578,6 +592,20 @@ class Node(Base):
     connection_logs: Mapped[list["ConnectionLog"]] = relationship(
         "ConnectionLog", back_populates="node", cascade="all, delete-orphan"
     )
+
+    @property
+    def agent_cert_fingerprint(self) -> Optional[str]:
+        """SHA-256 of the pinned agent certificate (AA:BB:...), for the
+        admin to compare against the agent's `--print-cert` output."""
+        if not self.agent_cert_pem:
+            return None
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        try:
+            digest = x509.load_pem_x509_certificate(self.agent_cert_pem.encode()).fingerprint(hashes.SHA256())
+        except ValueError:
+            return None
+        return ":".join(f"{b:02X}" for b in digest)
 
 
 # ═══════════════════════════════════════════════════════════════════

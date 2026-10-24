@@ -16,7 +16,8 @@ from backend.app.api.auth import get_db, require_admin
 from backend.app.core.config import settings
 from backend.app.core.logging_config import audit_logger
 from backend.app.core.security import generate_api_key
-from backend.app.models import Node, User
+from backend.app.generators.generator_amnezia import validate_amnezia_params
+from backend.app.models import Node, NodeProtocol, User
 from backend.app.schemas import (
     MessageResponse,
     NodeCreate,
@@ -27,6 +28,21 @@ from backend.app.schemas import (
 
 logger = logging.getLogger("mtgroup.api.nodes")
 router = APIRouter(prefix="/api/nodes", tags=["Nodes"])
+
+
+def _check_amnezia(node: Node) -> None:
+    """Reject AmneziaWG parameter sets the client would refuse — otherwise
+    the bad values only surface later as a 500 on every config fetch."""
+    if node.protocol != NodeProtocol.AMNEZIA_WG:
+        return
+    try:
+        validate_amnezia_params(
+            jc=node.amnezia_jc, jmin=node.amnezia_jmin, jmax=node.amnezia_jmax,
+            s1=node.amnezia_s1, s2=node.amnezia_s2,
+            h1=node.amnezia_h1, h2=node.amnezia_h2, h3=node.amnezia_h3, h4=node.amnezia_h4,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid AmneziaWG parameters: {e}") from None
 
 
 @router.post("", response_model=NodeResponse, status_code=status.HTTP_201_CREATED)
@@ -49,6 +65,8 @@ async def create_node(
         name=body.name,
         address=body.address,
         port=body.port,
+        agent_port=body.agent_port,
+        agent_cert_pem=body.agent_cert_pem,
         protocol=body.protocol.value,
         sni=body.sni,
         reality_public_key=body.reality_public_key,
@@ -75,6 +93,7 @@ async def create_node(
         amnezia_h3=body.amnezia_h3,
         amnezia_h4=body.amnezia_h4,
     )
+    _check_amnezia(node)
     db.add(node)
     await db.commit()
     await db.refresh(node)
@@ -130,9 +149,12 @@ async def update_node(
         raise HTTPException(status_code=404, detail="Node not found")
 
     update_data = body.model_dump(exclude_unset=True)
+    if update_data.get("agent_cert_pem") == "":
+        update_data["agent_cert_pem"] = None  # clear the pin
     for key, value in update_data.items():
         if hasattr(node, key):
             setattr(node, key, value)
+    _check_amnezia(node)
 
     node.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -170,6 +192,41 @@ async def delete_node(
     )
 
     return MessageResponse(message=f"Node '{name}' deleted")
+
+
+@router.get("/{node_id}/agent-setup")
+async def get_agent_setup(
+    node_id: int,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """What an admin needs to install the agent on this node.
+
+    The node's API key (the HMAC secret both sides sign with) was generated
+    at creation but never returned by any endpoint, so there was no way to
+    configure an agent that the panel could talk to.
+    """
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    audit_logger.log_admin_action(admin_username=admin.username, action="view_agent_setup", target=node.name)
+    return {
+        "node_id": node.id,
+        "api_key": node.api_key,
+        "agent_port": node.agent_port,
+        "agent_cert_fingerprint": node.agent_cert_fingerprint,
+        "install_command": (
+            f"sudo MTGROUP_NODE_API_KEY='{node.api_key}' MTGROUP_NODE_PORT={node.agent_port} "
+            "bash agent/install_agent.sh"
+        ),
+        "next_step": (
+            "Paste the certificate the installer prints into this node's agent_cert_pem "
+            "(PATCH /api/nodes/{id}) to pin it. If you skip this, the panel pins whatever "
+            "certificate it sees on first contact."
+        ),
+    }
 
 
 @router.post("/{node_id}/redeploy-ip", response_model=MessageResponse)
@@ -253,16 +310,16 @@ async def _provision_floating_ip(node: Node) -> str:
         return await _hetzner_provision_ip(node)
     elif node.cloud_provider == "ovh" and settings.OVH_APP_KEY:
         return await _ovh_provision_ip(node)
-    else:
-        # Simulation mode — generate a new random IP for testing
-        import random
-        new_ip = f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
-        logger.warning(
-            "Cloud provider not configured for node %s, using simulated IP: %s",
-            node.name,
-            new_ip,
-        )
-        return new_ip
+    # This used to invent a random 10.x.x.x "simulated" IP and save it as
+    # the node's floating_ip, which every subscription then handed out —
+    # turning an admin click into an outage for that server.
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"No cloud provider configured for node '{node.name}' "
+            "(set cloud_provider plus HETZNER_API_TOKEN or OVH_* credentials)"
+        ),
+    )
 
 
 async def _hetzner_provision_ip(node: Node) -> str:

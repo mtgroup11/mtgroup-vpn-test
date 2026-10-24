@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 import time
 
 import pytest
@@ -28,10 +29,24 @@ import agent.node_daemon as nd
 API_KEY = "test-node-api-key"
 
 
-def _signed_body(payload_dict: dict) -> tuple[bytes, str]:
+def _sign(method: str, path: str, body: bytes, ts: int | None = None, nonce: str | None = None) -> dict[str, str]:
+    """Headers for a request signed the way orchestrator._send_request does."""
+    ts = int(time.time()) if ts is None else ts
+    nonce = nonce or secrets.token_urlsafe(16)
+    msg = f"{method}\n{path}\n{ts}\n{nonce}\n".encode("utf-8") + body
+    return {
+        "X-MTGroup-Signature": hmac.new(API_KEY.encode("utf-8"), msg, hashlib.sha256).hexdigest(),
+        "X-MTGroup-Timestamp": str(ts),
+        "X-MTGroup-Nonce": nonce,
+    }
+
+
+def _signed_body(payload_dict: dict) -> tuple[bytes, dict[str, str]]:
+    """Body + signed headers for POST /api/v1/sync. A `_ts` key in the
+    payload (legacy, ignored by the daemon) sets the signed timestamp, so
+    tests can still construct stale requests the readable way."""
     body = json.dumps(payload_dict, separators=(",", ":")).encode("utf-8")
-    sig = hmac.new(API_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return body, sig
+    return body, _sign("POST", "/api/v1/sync", body, ts=payload_dict.get("_ts"))
 
 
 def _xray_config(port: int = 443, users: list[str] | None = None) -> dict:
@@ -79,8 +94,10 @@ def node_env(tmp_path, monkeypatch):
     return cfg, restarts
 
 
-async def _post(client, body: bytes, sig: str):
-    return await client.post("/api/v1/sync", data=body, headers={"X-MTGroup-Signature": sig})
+async def _post(client, body: bytes, headers):
+    if isinstance(headers, str):  # a raw (forged) signature value
+        headers = {**_sign("POST", "/api/v1/sync", body), "X-MTGroup-Signature": headers}
+    return await client.post("/api/v1/sync", data=body, headers=headers)
 
 
 @pytest_asyncio.fixture
@@ -831,10 +848,7 @@ class TestGetXrayUserTraffic:
 
 
 def _signed_health_headers(ts: int | None = None) -> dict[str, str]:
-    ts = int(time.time()) if ts is None else ts
-    body = json.dumps({"_ts": ts}, separators=(",", ":")).encode("utf-8")
-    sig = hmac.new(API_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return {"X-MTGroup-Signature": sig, "X-MTGroup-Timestamp": str(ts)}
+    return _sign("GET", "/api/v1/health", b"", ts=ts)
 
 
 class TestHealthHandler:
@@ -898,3 +912,57 @@ class TestHealthHandler:
     async def test_stale_timestamp_rejected(self, client):
         resp = await client.get("/api/v1/health", headers=_signed_health_headers(ts=int(time.time()) - 120))
         assert resp.status == 401
+
+
+
+class TestWireAuthentication:
+    """The signature covers method, path, timestamp and a single-use nonce."""
+
+    async def test_replayed_request_is_rejected(self, node_env, client):
+        cfg, restarts = node_env
+        nd.atomic_write_config(str(cfg), _xray_config())
+        body, headers = _signed_body({"config_type": "vless",
+                                      "payload": {"action": "drop_user", "user_uuid": "alice"}})
+        first = await _post(client, body, headers)
+        second = await _post(client, body, headers)
+        assert first.status == 200
+        assert second.status == 401
+        assert restarts == ["xray"]
+
+    async def test_signature_for_one_path_is_not_valid_on_another(self, node_env, client):
+        headers = _sign("GET", "/api/v1/sync", b"")
+        resp = await client.get("/api/v1/health", headers=headers)
+        assert resp.status == 401
+
+    async def test_body_tampering_is_rejected(self, node_env, client):
+        cfg, restarts = node_env
+        body, headers = _signed_body({"config_type": "vless", "payload": _xray_config(users=["a"])})
+        tampered = body.replace(b'"a"', b'"x"')
+        resp = await _post(client, tampered, headers)
+        assert resp.status == 401
+        assert restarts == []
+
+    async def test_missing_nonce_is_rejected(self, node_env, client):
+        headers = _signed_health_headers()
+        headers.pop("X-MTGroup-Nonce")
+        resp = await client.get("/api/v1/health", headers=headers)
+        assert resp.status == 401
+
+    def test_no_api_key_rejects_everything(self, monkeypatch):
+        monkeypatch.setattr(nd, "API_KEY", "")
+        assert nd.verify_request("GET", "/api/v1/health", _signed_health_headers(), b"") is not None
+
+
+class TestTlsMaterial:
+    def test_generates_once_and_reuses(self, tmp_path):
+        cert, key = nd.ensure_tls_material(str(tmp_path))
+        first = open(cert, encoding="utf-8").read()
+        cert2, _ = nd.ensure_tls_material(str(tmp_path))
+        assert open(cert2, encoding="utf-8").read() == first
+        assert len(nd.cert_fingerprint(first).split(":")) == 32
+
+    def test_cert_is_usable_as_the_sole_trust_anchor(self, tmp_path):
+        import ssl as _ssl
+        cert, _ = nd.ensure_tls_material(str(tmp_path))
+        ctx = _ssl.create_default_context(cadata=open(cert, encoding="utf-8").read())
+        assert ctx.get_ca_certs()

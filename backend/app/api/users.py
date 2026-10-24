@@ -18,6 +18,7 @@ from backend.app.api.auth import get_db, require_admin, require_admin_or_reselle
 from backend.app.core.config import settings
 from backend.app.core.logging_config import audit_logger
 from backend.app.core.security import generate_subscription_token, hash_password
+from backend.app.core.node_user_sync import request_user_sync
 from backend.app.core.wireguard_peers import revoke_peers
 from backend.app.models import Subscription, User, UserRole
 from backend.app.schemas import (
@@ -134,6 +135,7 @@ async def create_user(
     await db.commit()
     await db.refresh(user)
 
+    request_user_sync()
     audit_logger.log_admin_action(
         admin_username=current_user.username,
         action="create_user",
@@ -289,6 +291,7 @@ async def update_user(
     )
     sub_token = sub_result.scalar_one_or_none()
 
+    request_user_sync()
     audit_logger.log_admin_action(
         admin_username=admin.username,
         action="update_user",
@@ -326,6 +329,7 @@ async def delete_user(
     await db.delete(user)
     await db.commit()
 
+    request_user_sync()
     audit_logger.log_admin_action(
         admin_username=admin.username,
         action="delete_user",
@@ -361,6 +365,7 @@ async def reset_user_traffic(
     )
     sub_token = sub_result.scalar_one_or_none()
 
+    request_user_sync()
     audit_logger.log_admin_action(
         admin_username=admin.username,
         action="reset_traffic",
@@ -424,6 +429,7 @@ async def regenerate_subscription(
     await db.commit()
     await db.refresh(user)
 
+    request_user_sync()
     audit_logger.log_admin_action(
         admin_username=admin.username,
         action="regenerate_subscription",

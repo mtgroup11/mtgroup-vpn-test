@@ -3,8 +3,8 @@ MTGroup VPN Ultimate — Remote Node Daemon
 ═══════════════════════════════════════════════════════════════════
 Lightweight background agent for remote servers.
 Receives commands from the Master panel over ``POST /api/v1/sync``,
-verifies HMAC-SHA256 + a ±30s replay window, applies them to the local
-Xray/Sing-box config, and restarts the service.
+verifies the request signature (see "Wire authentication" below), applies
+them to the local Xray/Sing-box/AmneziaWG config, and restarts the service.
 Reports health metrics over ``GET /api/v1/health``, including per-user
 traffic when available: ``amnezia_peer_traffic`` (keyed by WireGuard
 public key, from ``awg show transfer``) and ``xray_user_traffic`` (keyed
@@ -45,6 +45,23 @@ node's entire configuration and took every user on that node offline.
 Writes are atomic (temp file + ``os.replace``) so a crash mid-write can't
 leave a truncated config either.
 
+Wire authentication (must match backend/app/orchestrator.py — the two
+sides share no code)::
+
+    X-MTGroup-Timestamp: <unix seconds>      within ±30s of node clock
+    X-MTGroup-Nonce:     <16-64 url-safe chars, single use>
+    X-MTGroup-Signature: hex HMAC-SHA256(api_key,
+                             METHOD "\n" PATH "\n" TIMESTAMP "\n" NONCE "\n" BODY)
+
+Method and path are signed so a captured request can't be re-aimed at
+another endpoint, and each nonce is accepted once, so a captured request
+can't be replayed inside the time window either. The old scheme signed
+only the body (and, for GET, only the timestamp).
+
+Transport is HTTPS with a self-signed certificate generated on first
+start (``--print-cert`` prints it). The master pins that exact
+certificate per node rather than skipping verification.
+
 Every AmneziaWG-mutating write (``sync``, ``add_peer``, ``remove_peer``)
 arms the local Anti-Lockout Watchdog first (``agent/watchdog_client.py``,
 talking to the same daemon ``install.sh`` sets up for Xray/iptables) and
@@ -52,15 +69,20 @@ disarms it right after. If this process crashes or hangs mid-change, the
 watchdog's own timeout restores the pre-change config on its own.
 """
 
+import argparse
 import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
+import ssl
 import subprocess
+import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 
 import psutil
 from aiohttp import web
@@ -78,19 +100,109 @@ logging.basicConfig(
 logger = logging.getLogger("node_daemon")
 
 
-def verify_signature(api_key: str, signature: str, body_bytes: bytes) -> bool:
-    """Verifies the HMAC-SHA256 signature."""
-    if not api_key:
-        logger.warning("No API_KEY set on the node! Rejecting request.")
-        return False
-        
-    expected_mac = hmac.new(
-        api_key.encode("utf-8"),
-        body_bytes,
-        hashlib.sha256
+SIGNATURE_WINDOW_SECONDS = 30
+_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+_MAX_TRACKED_NONCES = 100_000
+# nonce -> unix time it was first seen. Pruned on every request; anything
+# older than twice the window can no longer pass the timestamp check anyway.
+_seen_nonces: dict[str, float] = {}
+
+
+def canonical_message(method: str, path: str, ts: str, nonce: str, body: bytes) -> bytes:
+    return f"{method.upper()}\n{path}\n{ts}\n{nonce}\n".encode("utf-8") + body
+
+
+def verify_request(method: str, path: str, headers, body: bytes, api_key: str | None = None) -> str | None:
+    """Return None if the request is authentic and fresh, else a reason."""
+    key = API_KEY if api_key is None else api_key
+    if not key:
+        return "node has no API key configured"
+    signature = headers.get("X-MTGroup-Signature", "")
+    ts = headers.get("X-MTGroup-Timestamp", "")
+    nonce = headers.get("X-MTGroup-Nonce", "")
+    if not ts.isdigit() or not _NONCE_RE.match(nonce):
+        return "missing or malformed timestamp/nonce"
+
+    expected = hmac.new(
+        key.encode("utf-8"), canonical_message(method, path, ts, nonce, body), hashlib.sha256,
     ).hexdigest()
-    
-    return hmac.compare_digest(expected_mac, signature)
+    if not hmac.compare_digest(expected, signature):
+        return "bad signature"
+
+    now = time.time()
+    if abs(now - int(ts)) > SIGNATURE_WINDOW_SECONDS:
+        return f"timestamp outside ±{SIGNATURE_WINDOW_SECONDS}s window"
+
+    cutoff = now - 2 * SIGNATURE_WINDOW_SECONDS
+    for seen, at in list(_seen_nonces.items()):
+        if at < cutoff:
+            del _seen_nonces[seen]
+    if nonce in _seen_nonces:
+        return "replayed nonce"
+    if len(_seen_nonces) >= _MAX_TRACKED_NONCES:
+        # Only authenticated requests get this far, so this means a flood
+        # from someone holding the key. Fail closed rather than forget.
+        return "too many requests in window"
+    _seen_nonces[nonce] = now
+    return None
+
+
+# ── TLS ────────────────────────────────────────────────────────────────
+TLS_DIR = os.environ.get("MTGROUP_NODE_TLS_DIR", "/etc/mtgroup-agent/tls")
+
+
+def ensure_tls_material(tls_dir: str = TLS_DIR) -> tuple[str, str]:
+    """Create (once) and return the agent's self-signed cert/key paths.
+
+    Marked as a CA (basicConstraints CA:TRUE, keyCertSign) so the master can
+    load this exact certificate as the only trust anchor for this node —
+    that is how the pin is enforced, with no hostname involved.
+    """
+    cert_path = os.path.join(tls_dir, "agent.crt")
+    key_path = os.path.join(tls_dir, "agent.key")
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        return cert_path, key_path
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    os.makedirs(tls_dir, mode=0o700, exist_ok=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    # A neutral, per-install name — nothing that marks every agent as the
+    # same product.
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, os.urandom(8).hex())])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=True, crl_sign=False, content_commitment=False,
+            key_encipherment=False, data_encipherment=False, key_agreement=False,
+            encipher_only=False, decipher_only=False), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                  serialization.NoEncryption()))
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    logger.info("Generated agent TLS certificate at %s", cert_path)
+    return cert_path, key_path
+
+
+def cert_fingerprint(pem: str) -> str:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    der_fp = x509.load_pem_x509_certificate(pem.encode()).fingerprint(hashes.SHA256())
+    return ":".join(f"{b:02X}" for b in der_fp)
 
 
 # AmneziaWG interface name and its on-disk config. `awg-quick@awg0` is the
@@ -412,27 +524,16 @@ async def sync_handler(request: web.Request) -> web.Response:
     Receives JSON configuration, validates signature, writes to disk,
     and restarts the appropriate service.
     """
-    signature = request.headers.get("X-MTGroup-Signature", "")
-    request.headers.get("X-MTGroup-Timestamp", "")
-    
     body_bytes = await request.read()
-    
-    # Verify Signature
-    if not verify_signature(API_KEY, signature, body_bytes):
-        logger.warning("Invalid signature on sync request.")
+
+    problem = verify_request(request.method, request.path, request.headers, body_bytes)
+    if problem:
+        logger.warning("Rejected sync request: %s", problem)
         return web.json_response({"error": "Unauthorized"}, status=401)
-        
+
     try:
         data = json.loads(body_bytes)
-        # Prevent replay attacks (Strict ±30s Sliding Time Window)
-        req_ts = int(data.get("_ts", 0))
-        now = int(time.time())
-        time_diff = abs(now - req_ts)
-        if time_diff > 30:
-            logger.warning(f"Request rejected: time drift of {time_diff}s outside ±30s window (ts: {req_ts}, now: {now}).")
-            return web.json_response({"error": "Unauthorized - Request expired"}, status=401)
-            
-        config_type = data.get("config_type", "")
+        config_type= data.get("config_type", "")
         payload = data.get("payload", {})
         if not isinstance(payload, dict):
             return web.json_response({"error": "payload must be an object"}, status=400)
@@ -738,30 +839,13 @@ async def health_handler(request: web.Request) -> web.Response:
     GET /api/v1/health
     Returns system metrics.
     """
-    signature = request.headers.get("X-MTGroup-Signature", "")
-    
-    # GET requests have their _ts reconstructed from headers or we expect a signed body with just _ts
-    # As per orchestrator.py, it sends GET with body {"_ts": ts} but httpx doesn't send body on GET!
-    # Let's check orchestrator.py line 153:
-    # "GET: body not sent over wire, but Node reconstructs {"_ts":<ts>} from header to verify"
-    ts = request.headers.get("X-MTGroup-Timestamp", "0")
-    
-    reconstructed_body = json.dumps({"_ts": int(ts)}, separators=(',', ':')).encode("utf-8")
-    
-    if not verify_signature(API_KEY, signature, reconstructed_body):
-        logger.warning("Invalid signature on health request.")
+    problem = verify_request(request.method, request.path, request.headers, await request.read())
+    if problem:
+        logger.warning("Rejected health request: %s", problem)
         return web.json_response({"error": "Unauthorized"}, status=401)
-        
+
     try:
-        # Prevent replay attacks (Strict ±30s Sliding Time Window)
-        now = int(time.time())
-        req_ts = int(ts)
-        time_diff = abs(now - req_ts)
-        if time_diff > 30:
-            logger.warning(f"Health request rejected: time drift of {time_diff}s outside ±30s window (ts: {req_ts}, now: {now}).")
-            return web.json_response({"error": "Unauthorized - Request expired"}, status=401)
-            
-        cpu_usage = psutil.cpu_percent(interval=None)
+        cpu_usage= psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
         active_conns = get_active_connections()
 
@@ -794,13 +878,30 @@ def create_app() -> web.Application:
     return app
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="MTGroup node agent")
+    parser.add_argument("--print-cert", action="store_true",
+                        help="create the TLS certificate if needed, print it with its fingerprint, and exit")
+    args = parser.parse_args(argv)
+
+    cert_path, key_path = ensure_tls_material()
+    if args.print_cert:
+        with open(cert_path, encoding="utf-8") as f:
+            pem = f.read()
+        print(pem.strip())
+        print(f"SHA-256 fingerprint: {cert_fingerprint(pem)}", file=sys.stderr)
+        return
+
     if not API_KEY:
         logger.warning("Starting WITHOUT API_KEY. All requests will be rejected!")
     else:
-        logger.info("Starting MTGroup Node Daemon...")
-        
-    app = create_app()
-    # SSL context can be added here if needed, but orchestrator uses verify=False
-    # so we can run behind a local reverse proxy or expose directly over HTTP/HTTPS
-    web.run_app(app, host="0.0.0.0", port=PORT, access_log=logger)  # nosec B104 - node daemon must be reachable by the master panel over the network
+        logger.info("Starting MTGroup Node Daemon on :%d (TLS)", PORT)
+
+    ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ssl_ctx.load_cert_chain(cert_path, key_path)
+    web.run_app(create_app(), host="0.0.0.0", port=PORT, ssl_context=ssl_ctx, access_log=logger)  # nosec B104 - node daemon must be reachable by the master panel over the network
+
+
+if __name__ == "__main__":
+    main()

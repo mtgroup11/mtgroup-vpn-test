@@ -312,28 +312,34 @@ class TrafficAccountingEngine:
         """
         Pushes a command via orchestrator to drop the user's connection immediately.
         """
-        from backend.app.models import Node
-        
+        from backend.app.core.node_user_sync import request_user_sync
+        from backend.app.core.security import derive_proxy_uuid
+        from backend.app.models import Node, NodeProtocol, Subscription
+
         try:
             async with self._db_session_factory() as session:
                 # Fetch all active nodes to push the update
                 result = await session.execute(select(Node).where(Node.is_active))
                 active_nodes = result.scalars().all()
                 
-                # We need to construct a "delete_user" or "sync" payload 
-                # (Assumes the Node Daemon supports a partial update or we sync full config without this user)
-                drop_payload = {
-                    "action": "drop_user",
-                    "user_uuid": user.username, # Or whatever identifier the node uses
-                }
-                
-                for node in active_nodes:
-                    # Depending on Node Daemon implementation, you might hit a different endpoint
-                    # or send a full sync. For now, we simulate a sync request with updated payload.
+                tokens = (await session.execute(
+                    select(Subscription.token).where(Subscription.user_id == user.id)
+                )).scalars().all()
+
+            # Nodes key Xray clients by the per-(subscription, node)
+            # credential (id == email == derive_proxy_uuid). This used to
+            # send the *username*, which matches no client on any node, so
+            # a suspended user kept connecting.
+            for node in active_nodes:
+                if node.protocol != NodeProtocol.VLESS_REALITY:
+                    continue
+                for token in tokens:
                     await orchestrator.sync_node_config(node, {
                         "config_type": node.protocol.value,
-                        "payload": drop_payload
+                        "payload": {"action": "drop_user", "user_uuid": derive_proxy_uuid(token, node.id)},
                     })
+            # And let the full reconcile (if enabled) converge as well.
+            request_user_sync()
         except Exception as e:
             logger.error(f"Failed to push drop_user command for {user.username}: {e}")
 

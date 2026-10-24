@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     # enforces nothing.
     ACCOUNTING_ENABLED: bool = False
 
+    # ── Node user provisioning ───────────────────────────────────────────
+    # Push each VLESS-Reality node a full Xray config containing exactly the
+    # users allowed to connect (core/node_user_sync.py). Without it nothing
+    # tells nodes which credentials are valid, and expiry/quota/deletion
+    # never take effect on a node. It *owns* the node's Xray config — a
+    # hand-tuned one is replaced — so existing deployments must opt in.
+    NODE_USER_SYNC_ENABLED: bool = False
+    NODE_USER_SYNC_INTERVAL_SEC: int = 60
+
     # ── Subscription Defaults ────────────────────────────────────────────
     DEFAULT_PROTOCOLS: str = "vless_reality,hysteria2"
     DEFAULT_SNI: str = "www.google.com"

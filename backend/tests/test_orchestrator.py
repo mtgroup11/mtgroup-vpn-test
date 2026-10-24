@@ -21,7 +21,8 @@ from backend.app.orchestrator import NodeOrchestrator, RetryTask
 
 
 def _make_node(**overrides):
-    defaults = dict(id=1, name="node-1", address="10.0.0.5", port=8443, api_key="test-api-key")
+    defaults = dict(id=1, name="node-1", address="10.0.0.5", port=443, agent_port=8443,
+                    agent_cert_pem="PEM", api_key="test-api-key")
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -55,58 +56,76 @@ class TestGenerateSignature:
         assert orch._generate_signature("key1", b"body") != orch._generate_signature("key2", b"body")
 
 
+class _FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    async def post(self, url, content=None, headers=None):
+        self.calls.append(("POST", url, content, headers))
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    async def get(self, url, headers=None):
+        self.calls.append(("GET", url, None, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url), json={"status": "healthy"})
+
+
+def _expected_sig(key, method, path, headers, body):
+    msg = f"{method}\n{path}\n{headers['X-MTGroup-Timestamp']}\n{headers['X-MTGroup-Nonce']}\n".encode() + body
+    return hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()
+
+
 class TestSendRequest:
-    @pytest.mark.asyncio
-    async def test_post_includes_signature_and_timestamp_headers(self, orch, monkeypatch):
-        captured = {}
-
-        async def _fake_post(url, content=None, headers=None):
-            captured["url"] = url
-            captured["content"] = content
-            captured["headers"] = headers
-            return httpx.Response(200, request=httpx.Request("POST", url))
-
-        monkeypatch.setattr(orch._client, "post", _fake_post)
-
-        await orch._send_request("10.0.0.5", 8443, "secret-key", "POST", "/api/v1/sync", {"foo": "bar"})
-
-        assert captured["url"] == "https://10.0.0.5:8443/api/v1/sync"
-        assert "X-MTGroup-Signature" in captured["headers"]
-        assert "X-MTGroup-Timestamp" in captured["headers"]
-        body = json.loads(captured["content"])
-        assert body["foo"] == "bar"
-        assert "_ts" in body
+    @pytest.fixture
+    def fake(self, orch, monkeypatch):
+        client = _FakeClient()
+        monkeypatch.setattr(orch, "_client_for", lambda pem: client)
+        return client
 
     @pytest.mark.asyncio
-    async def test_get_does_not_send_a_body(self, orch, monkeypatch):
-        captured = {}
+    async def test_post_signs_method_path_timestamp_nonce_and_body(self, orch, fake):
+        await orch._send_request("10.0.0.5", 8443, "secret-key", "POST", "/api/v1/sync", {"foo": "bar"},
+                                 cert_pem="PEM")
+        method, url, content, headers = fake.calls[0]
+        assert url == "https://10.0.0.5:8443/api/v1/sync"
+        assert json.loads(content) == {"foo": "bar"}
+        assert len(headers["X-MTGroup-Nonce"]) >= 16
+        assert abs(int(headers["X-MTGroup-Timestamp"]) - time.time()) < 5
+        assert headers["X-MTGroup-Signature"] == _expected_sig("secret-key", "POST", "/api/v1/sync", headers, content)
 
-        async def _fake_get(url, headers=None):
-            captured["headers"] = headers
-            return httpx.Response(200, request=httpx.Request("GET", url))
+    @pytest.mark.asyncio
+    async def test_get_signs_an_empty_body(self, orch, fake):
+        await orch._send_request("10.0.0.5", 8443, "secret-key", "GET", "/api/v1/health", cert_pem="PEM")
+        _, _, _, headers = fake.calls[0]
+        assert headers["X-MTGroup-Signature"] == _expected_sig("secret-key", "GET", "/api/v1/health", headers, b"")
 
-        monkeypatch.setattr(orch._client, "get", _fake_get)
-
-        await orch._send_request("10.0.0.5", 8443, "secret-key", "GET", "/api/v1/health")
-        assert "X-MTGroup-Signature" in captured["headers"]
+    @pytest.mark.asyncio
+    async def test_every_request_gets_a_fresh_nonce(self, orch, fake):
+        for _ in range(3):
+            await orch._send_request("10.0.0.5", 8443, "k", "GET", "/api/v1/health", cert_pem="PEM")
+        assert len({c[3]["X-MTGroup-Nonce"] for c in fake.calls}) == 3
 
     @pytest.mark.asyncio
     async def test_rejects_unsupported_method(self, orch):
         with pytest.raises(ValueError):
-            await orch._send_request("10.0.0.5", 8443, "key", "DELETE", "/api/v1/sync")
+            await orch._send_request("10.0.0.5", 8443, "key", "DELETE", "/api/v1/sync", cert_pem="PEM")
 
     @pytest.mark.asyncio
-    async def test_payload_is_not_mutated(self, orch, monkeypatch):
-        """`_send_request` must not add `_ts` to the caller's own dict —
-        it should copy first."""
-        async def _fake_post(url, content=None, headers=None):
-            return httpx.Response(200, request=httpx.Request("POST", url))
-
-        monkeypatch.setattr(orch._client, "post", _fake_post)
-
+    async def test_payload_is_not_mutated(self, orch, fake):
         original_payload = {"foo": "bar"}
-        await orch._send_request("10.0.0.5", 8443, "key", "POST", "/api/v1/sync", original_payload)
+        await orch._send_request("10.0.0.5", 8443, "key", "POST", "/api/v1/sync", original_payload, cert_pem="PEM")
         assert original_payload == {"foo": "bar"}
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_connect_without_a_pinned_certificate(self, orch):
+        with pytest.raises(httpx.ConnectError):
+            await orch._send_request("10.0.0.5", 8443, "key", "GET", "/api/v1/health", cert_pem=None)
+
+    @pytest.mark.asyncio
+    async def test_health_and_sync_go_to_the_agent_port_not_the_vpn_port(self, orch, fake):
+        node = _make_node(port=51820, agent_port=9443)
+        await orch.sync_node_config(node, {"payload": {}})
+        await orch.check_node_health(node)
+        assert all(":9443/" in c[1] for c in fake.calls)
 
 
 class TestSyncNodeConfig:
@@ -126,7 +145,7 @@ class TestSyncNodeConfig:
             raise httpx.ConnectError("unreachable")
 
         monkeypatch.setattr(orch, "_send_request", _fake_send)
-        monkeypatch.setattr(orch, "_mark_node_offline", AsyncMock())
+        monkeypatch.setattr(orch, "_record_health_failure", AsyncMock())
 
         node = _make_node()
         await orch.sync_node_config(node, {"config_type": "test"})
@@ -135,7 +154,7 @@ class TestSyncNodeConfig:
         task: RetryTask = await orch._retry_queue.get()
         assert task.node_id == node.id
         assert task.attempt == 1
-        orch._mark_node_offline.assert_awaited_once_with(node.id)
+        orch._record_health_failure.assert_awaited_once_with(node.id)
 
     @pytest.mark.asyncio
     async def test_http_error_status_also_queues_retry(self, orch, monkeypatch):
@@ -144,7 +163,7 @@ class TestSyncNodeConfig:
             resp.raise_for_status()  # raises HTTPStatusError
 
         monkeypatch.setattr(orch, "_send_request", _fake_send)
-        monkeypatch.setattr(orch, "_mark_node_offline", AsyncMock())
+        monkeypatch.setattr(orch, "_record_health_failure", AsyncMock())
 
         await orch.sync_node_config(_make_node(), {})
         assert orch._retry_queue.qsize() == 1
@@ -153,7 +172,7 @@ class TestSyncNodeConfig:
 class TestCheckNodeHealth:
     @pytest.mark.asyncio
     async def test_updates_db_on_success(self, orch, monkeypatch):
-        db_node = SimpleNamespace(id=1, is_active=False, health_status="offline", current_connections=0, last_health_check=None)
+        db_node = SimpleNamespace(id=1, name="n1", is_active=False, health_status="offline", current_connections=0, last_health_check=None)
         session = AsyncMock()
         session.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=db_node))
         orch._db_session_factory = _db_factory_with_session(session)
@@ -168,7 +187,8 @@ class TestCheckNodeHealth:
 
         await orch.check_node_health(_make_node())
 
-        assert db_node.is_active is True
+        # is_active is the admin's switch; a health result never changes it.
+        assert db_node.is_active is False
         assert db_node.health_status == "healthy"
         assert db_node.current_connections == 42
         session.commit.assert_awaited_once()
@@ -179,15 +199,15 @@ class TestCheckNodeHealth:
             raise httpx.ConnectError("down")
 
         monkeypatch.setattr(orch, "_send_request", _fake_send)
-        monkeypatch.setattr(orch, "_mark_node_offline", AsyncMock())
+        monkeypatch.setattr(orch, "_record_health_failure", AsyncMock())
 
         node = _make_node()
         await orch.check_node_health(node)
-        orch._mark_node_offline.assert_awaited_once_with(node.id)
+        orch._record_health_failure.assert_awaited_once_with(node.id)
 
     @pytest.mark.asyncio
     async def test_captures_traffic_snapshot_when_present(self, orch, monkeypatch):
-        db_node = SimpleNamespace(id=1, is_active=False, health_status="offline", current_connections=0, last_health_check=None)
+        db_node = SimpleNamespace(id=1, name="n1", is_active=False, health_status="offline", current_connections=0, last_health_check=None)
         session = AsyncMock()
         session.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=db_node))
         orch._db_session_factory = _db_factory_with_session(session)
@@ -390,7 +410,7 @@ class TestBroadcastMeshPeers:
 
         sent_payloads = []
 
-        async def _fake_send(*, address, port, api_key, method, endpoint, payload):
+        async def _fake_send(*, address, port, api_key, method, endpoint, payload, cert_pem=None):
             sent_payloads.append((address, payload))
             return httpx.Response(200, request=httpx.Request("POST", "https://x"))
 
@@ -568,5 +588,19 @@ class TestLifecycle:
         assert orch._health_poll_task is not None
         await orch.stop()
         assert orch._is_running is False
-        assert orch._client.is_closed
+        assert orch._clients == {}
         assert orch._health_poll_task.cancelled() or orch._health_poll_task.done()
+
+
+@pytest.mark.asyncio
+async def test_non_json_health_response_counts_as_a_failure(orch, monkeypatch):
+    """A 200 with a non-JSON body (a captive portal, a misrouted port) used
+    to raise out of check_node_health instead of being recorded."""
+    async def _fake_send(*a, **kw):
+        return httpx.Response(200, request=httpx.Request("GET", "https://x"), content=b"<html>hi</html>")
+
+    monkeypatch.setattr(orch, "_send_request", _fake_send)
+    monkeypatch.setattr(orch, "_record_health_failure", AsyncMock())
+    node = _make_node()
+    await orch.check_node_health(node)
+    orch._record_health_failure.assert_awaited_once_with(node.id)

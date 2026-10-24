@@ -135,6 +135,10 @@ class TestPreAlembicDatabaseAdoption:
             conn.execute("DROP TABLE IF EXISTS wireguard_peers")
             conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_subnet")
             conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_server_public_key")
+            # ...and everything every later migration added on top
+            # (c0d043a03fcd: node agent endpoint + pinned certificate).
+            conn.execute("ALTER TABLE nodes DROP COLUMN agent_port")
+            conn.execute("ALTER TABLE nodes DROP COLUMN agent_cert_pem")
             conn.execute("DROP TABLE IF EXISTS alembic_version")
             conn.commit()
         finally:

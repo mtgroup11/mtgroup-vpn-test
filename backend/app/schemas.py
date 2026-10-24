@@ -6,6 +6,7 @@ Request/Response models for the FastAPI backend.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -169,10 +170,36 @@ class NodeProtocol(str, Enum):
     ICMP_TUNNEL = "icmp_tunnel"
 
 
+_SHORT_ID_RE = re.compile(r"^(?:[0-9a-fA-F]{2}){0,8}$")
+
+
+def validate_short_id(value: Optional[str]) -> Optional[str]:
+    """Xray accepts Reality short IDs of 0-16 hex digits, even length."""
+    if value is not None and not _SHORT_ID_RE.match(value):
+        raise ValueError("reality_short_id must be 0-16 hex characters, even length")
+    return value
+
+
+def validate_agent_cert_pem(value: Optional[str]) -> Optional[str]:
+    """The node agent's certificate as printed by
+    `python -m agent.node_daemon --print-cert`. Parsed here so a typo is a
+    422 at save time rather than every connection to the node failing."""
+    if value is None or not value.strip():
+        return None
+    from cryptography import x509
+    try:
+        x509.load_pem_x509_certificate(value.strip().encode("utf-8"))
+    except ValueError:
+        raise ValueError("agent_cert_pem is not a valid PEM certificate") from None
+    return value.strip() + "\n"
+
+
 class NodeCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     address: str = Field(..., min_length=1, max_length=256)
     port: int = Field(default=443, ge=1, le=65535)
+    agent_port: int = Field(default=8443, ge=1, le=65535)
+    agent_cert_pem: Optional[str] = Field(default=None, max_length=8192)
     protocol: NodeProtocol = NodeProtocol.VLESS_REALITY
     sni: str = Field(default="www.google.com", max_length=256)
     reality_public_key: Optional[str] = None
@@ -202,6 +229,9 @@ class NodeCreate(BaseModel):
     amnezia_h3: int = Field(default=3, ge=0, le=4294967295)
     amnezia_h4: int = Field(default=4, ge=0, le=4294967295)
 
+    _check_short_id = field_validator("reality_short_id")(validate_short_id)
+    _check_agent_cert = field_validator("agent_cert_pem")(validate_agent_cert_pem)
+
     @model_validator(mode="after")
     def validate_port_range(self) -> "NodeCreate":
         if self.port_pool_high_end <= self.port_pool_high_start:
@@ -213,6 +243,9 @@ class NodeUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=128)
     address: Optional[str] = Field(default=None, max_length=256)
     port: Optional[int] = Field(default=None, ge=1, le=65535)
+    agent_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    # Send "" to clear the pin (the next contact then re-pins on first use).
+    agent_cert_pem: Optional[str] = Field(default=None, max_length=8192)
     is_active: Optional[bool] = None
     protocol: Optional[NodeProtocol] = None
     sni: Optional[str] = None
@@ -226,17 +259,26 @@ class NodeUpdate(BaseModel):
     port_pool_high_start: Optional[int] = None
     port_pool_high_end: Optional[int] = None
     port_hop_interval_sec: Optional[int] = None
-    amnezia_server_public_key: Optional[str] = None
-    amnezia_subnet: Optional[str] = None
-    amnezia_jc: Optional[int] = None
-    amnezia_jmin: Optional[int] = None
-    amnezia_jmax: Optional[int] = None
-    amnezia_s1: Optional[int] = None
-    amnezia_s2: Optional[int] = None
-    amnezia_h1: Optional[int] = None
-    amnezia_h2: Optional[int] = None
-    amnezia_h3: Optional[int] = None
-    amnezia_h4: Optional[int] = None
+    amnezia_server_public_key: Optional[str] = Field(default=None, max_length=128)
+    amnezia_subnet: Optional[str] = Field(default=None, max_length=64)
+    amnezia_jc: Optional[int] = Field(default=None, ge=0, le=128)
+    amnezia_jmin: Optional[int] = Field(default=None, ge=0, le=1280)
+    amnezia_jmax: Optional[int] = Field(default=None, ge=0, le=1280)
+    amnezia_s1: Optional[int] = Field(default=None, ge=0, le=1280)
+    amnezia_s2: Optional[int] = Field(default=None, ge=0, le=1280)
+    amnezia_h1: Optional[int] = Field(default=None, ge=0, le=4294967295)
+    amnezia_h2: Optional[int] = Field(default=None, ge=0, le=4294967295)
+    amnezia_h3: Optional[int] = Field(default=None, ge=0, le=4294967295)
+    amnezia_h4: Optional[int] = Field(default=None, ge=0, le=4294967295)
+
+    _check_short_id = field_validator("reality_short_id")(validate_short_id)
+
+    @field_validator("agent_cert_pem")
+    @classmethod
+    def _check_agent_cert(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            return ""  # explicit "clear the pin"
+        return validate_agent_cert_pem(value)
 
 
 class NodeResponse(BaseModel):
@@ -244,6 +286,10 @@ class NodeResponse(BaseModel):
     name: str
     address: str
     port: int
+    agent_port: int = 8443
+    # SHA-256 of the pinned agent certificate, or None if not pinned yet.
+    agent_cert_fingerprint: Optional[str] = None
+    health_status: str = "unknown"
     is_active: bool
     protocol: NodeProtocol
     sni: Optional[str]

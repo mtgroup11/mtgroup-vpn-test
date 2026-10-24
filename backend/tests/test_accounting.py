@@ -141,6 +141,9 @@ class TestProcessAccounting:
                 is_active=True,
             )
             session.add_all([node, user])
+            await session.flush()
+            from backend.app.models import Subscription
+            session.add(Subscription(user_id=user.id, token="acct-over-limit-tok"))
             await session.commit()
             await session.refresh(user)
             user_id = user.id
@@ -325,7 +328,10 @@ class TestProcessAccounting:
 
 class TestDropUserFromNodes:
     @pytest.mark.asyncio
-    async def test_syncs_drop_payload_to_all_active_nodes(self, acct_engine, monkeypatch):
+    async def test_drops_the_subscription_credential_on_active_vless_nodes(self, acct_engine, monkeypatch):
+        from backend.app.core.security import derive_proxy_uuid
+        from backend.app.models import Subscription
+
         engine, factory = acct_engine
         sync_mock = AsyncMock()
         monkeypatch.setattr("backend.app.core.accounting.orchestrator.sync_node_config", sync_mock)
@@ -333,10 +339,14 @@ class TestDropUserFromNodes:
         async with factory() as session:
             active_node = Node(name="drop-node-active", address="10.0.0.10", protocol=NodeProtocol.VLESS_REALITY, is_active=True)
             inactive_node = Node(name="drop-node-inactive", address="10.0.0.11", protocol=NodeProtocol.VLESS_REALITY, is_active=False)
+            awg_node = Node(name="drop-node-awg", address="10.0.0.13", protocol=NodeProtocol.AMNEZIA_WG, is_active=True)
             user = User(username="drop-target-user", hashed_password=hash_password("Pw123456!"))
-            session.add_all([active_node, inactive_node, user])
+            session.add_all([active_node, inactive_node, awg_node, user])
+            await session.flush()
+            session.add(Subscription(user_id=user.id, token="drop-tok"))
             await session.commit()
             await session.refresh(user)
+            await session.refresh(active_node)
 
         await engine._drop_user_from_nodes(user)
 
@@ -344,7 +354,9 @@ class TestDropUserFromNodes:
         call_args = sync_mock.await_args
         assert call_args.args[0].name == "drop-node-active"
         assert call_args.args[1]["payload"]["action"] == "drop_user"
-        assert call_args.args[1]["payload"]["user_uuid"] == "drop-target-user"
+        # The identifier the node's Xray clients are keyed by — not the
+        # username, which matched nothing.
+        assert call_args.args[1]["payload"]["user_uuid"] == derive_proxy_uuid("drop-tok", active_node.id)
 
     @pytest.mark.asyncio
     async def test_swallows_orchestrator_errors(self, acct_engine, monkeypatch):

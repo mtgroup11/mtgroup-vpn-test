@@ -228,6 +228,12 @@ async def lifespan(app: FastAPI):
     # Inject db_session_factory to orchestrator
     orchestrator._db_session_factory = db_session_factory
 
+    from backend.app.core import node_user_sync
+    if settings.NODE_USER_SYNC_ENABLED:
+        node_user_sync.user_sync = node_user_sync.NodeUserSync(
+            db_session_factory, orchestrator, interval_sec=settings.NODE_USER_SYNC_INTERVAL_SEC,
+        )
+
     # Start background tasks conditionally
     logging.info("Starting background engines...")
     # orchestrator.start() launches its retry-queue worker and node
@@ -256,6 +262,11 @@ async def lifespan(app: FastAPI):
         logging.info("ACCOUNTING_ENABLED. Traffic accounting engine started LIVE (dry_run=False) — over-quota users/agents will be suspended.")
     else:
         logging.info("ACCOUNTING_ENABLED is false. Traffic accounting engine bypassed.")
+    if node_user_sync.user_sync is not None:
+        tasks.append(node_user_sync.user_sync.start())
+        logging.info("NODE_USER_SYNC_ENABLED. Provisioning users onto VLESS-Reality nodes.")
+    else:
+        logging.info("NODE_USER_SYNC_ENABLED is false. Node Xray configs are not managed by the panel.")
     if getattr(settings, 'EBPF_ENABLED', False):
         tasks.append(hopper_engine.start())
         tasks.append(ai_engine.start())
@@ -296,6 +307,9 @@ async def lifespan(app: FastAPI):
         stop_tasks.append(sni_mux.stop())
     if getattr(settings, 'ACCOUNTING_ENABLED', False):
         stop_tasks.append(accounting_engine.stop())
+    if node_user_sync.user_sync is not None:
+        stop_tasks.append(node_user_sync.user_sync.stop())
+        node_user_sync.user_sync = None
     if getattr(settings, 'EBPF_ENABLED', False):
         stop_tasks.append(hopper_engine.stop())
         stop_tasks.append(ai_engine.stop())

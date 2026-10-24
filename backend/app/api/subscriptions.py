@@ -78,9 +78,15 @@ async def _get_user_by_sub_token(
 
 
 async def _get_active_nodes(db: AsyncSession) -> list[Node]:
-    """Fetch all active nodes."""
+    """Nodes to hand out: enabled by the admin and not known to be down.
+
+    "offline" is only ever set for a node that was healthy before and then
+    missed several consecutive health checks (see
+    NodeOrchestrator._record_health_failure); it clears itself on the next
+    successful check. "unknown"/"unreachable"/"degraded" nodes stay listed.
+    """
     result = await db.execute(
-        select(Node).where(Node.is_active)
+        select(Node).where(Node.is_active, Node.health_status != "offline")
     )
     return list(result.scalars().all())
 
