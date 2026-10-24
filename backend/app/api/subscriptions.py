@@ -11,7 +11,6 @@ import base64
 import io
 import json
 import logging
-import uuid as uuid_mod
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
@@ -21,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import get_db
 from backend.app.core.config import settings
+from backend.app.core.security import derive_proxy_uuid
 from backend.app.core.wireguard_peers import NoAddressesAvailable, get_or_create_peer
 from backend.app.generators.generator_amnezia import generate_amnezia_conf
 from backend.app.generators.generator_clash import (
@@ -81,12 +81,6 @@ async def _get_active_nodes(db: AsyncSession) -> list[Node]:
         select(Node).where(Node.is_active)
     )
     return list(result.scalars().all())
-
-
-def _generate_user_uuid(user_id: int, node_id: int) -> str:
-    """Generate a deterministic UUID for a user+node combination."""
-    namespace = uuid_mod.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-    return str(uuid_mod.uuid5(namespace, f"{user_id}:{node_id}"))
 
 
 def _detect_client(user_agent: str) -> str:
@@ -161,7 +155,7 @@ async def get_singbox_config(
         if node.protocol.value not in enabled_protocols:
             continue
 
-        user_uuid = _generate_user_uuid(user.id, node.id)
+        user_uuid = derive_proxy_uuid(sub.token, node.id)
         address = node.floating_ip or node.address
 
         if node.protocol == NodeProtocol.VLESS_REALITY:
@@ -265,7 +259,7 @@ async def get_clash_config(
         if node.protocol.value not in enabled_protocols:
             continue
 
-        user_uuid = _generate_user_uuid(user.id, node.id)
+        user_uuid = derive_proxy_uuid(sub.token, node.id)
         address = node.floating_ip or node.address
 
         if node.protocol == NodeProtocol.VLESS_REALITY:
@@ -340,7 +334,7 @@ async def get_v2ray_links(
         if node.protocol.value not in enabled_protocols:
             continue
 
-        user_uuid = _generate_user_uuid(user.id, node.id)
+        user_uuid = derive_proxy_uuid(sub.token, node.id)
         address = node.floating_ip or node.address
 
         if node.protocol == NodeProtocol.VLESS_REALITY:
@@ -573,7 +567,7 @@ async def get_raw_links(
         if node.protocol.value not in enabled_protocols:
             continue
 
-        user_uuid = _generate_user_uuid(user.id, node.id)
+        user_uuid = derive_proxy_uuid(sub.token, node.id)
         address = node.floating_ip or node.address
 
         if node.protocol == NodeProtocol.VLESS_REALITY:

@@ -12,6 +12,22 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Must match core.security.BCRYPT_MAX_PASSWORD_BYTES (not imported to keep
+# schemas free of the security module's settings/crypto imports).
+_PASSWORD_MAX_BYTES = 72
+
+
+def validate_password_bytes(value: Optional[str]) -> Optional[str]:
+    """bcrypt hashes at most 72 bytes; reject longer passwords with a clear
+    422 instead of a 500. Counted in UTF-8 bytes, not characters — a
+    Persian password hits this at ~36 characters."""
+    if value is not None and len(value.encode("utf-8")) > _PASSWORD_MAX_BYTES:
+        raise ValueError(
+            f"password must be at most {_PASSWORD_MAX_BYTES} bytes in UTF-8 "
+            "(about 36 Persian/Arabic or 72 Latin characters)"
+        )
+    return value
+
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -68,6 +84,8 @@ class UserCreate(BaseModel):
         description="Domains/IPs to force through tunnel",
     )
 
+    _check_password = field_validator("password")(validate_password_bytes)
+
 
 class UserUpdate(BaseModel):
     password: Optional[str] = Field(default=None, min_length=6, max_length=256)
@@ -84,6 +102,8 @@ class UserUpdate(BaseModel):
     iran_bypass: Optional[bool] = None
     split_tunnel_bypass: Optional[list[str]] = None
     split_tunnel_force: Optional[list[str]] = None
+
+    _check_password = field_validator("password")(validate_password_bytes)
 
 
 class UserResponse(BaseModel):

@@ -10,6 +10,7 @@ import hmac
 import secrets
 import threading
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -25,15 +26,36 @@ from backend.app.core.crypto_quantum import wrap_jwt_quantum, unwrap_jwt_quantum
 # Password Hashing (bcrypt)
 # ---------------------------------------------------------------------------
 
+# bcrypt only ever looks at the first 72 bytes. bcrypt>=5 raises ValueError
+# instead of truncating silently, which turned any longer password into a
+# 500 — and 72 *bytes* is only ~36 Persian/Arabic characters in UTF-8.
+# Schemas reject longer passwords up front (see schemas.validate_password_bytes);
+# these functions are the last line of defence.
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
 def hash_password(plain: str) -> str:
     """Hash a plain-text password with bcrypt."""
+    encoded = plain.encode("utf-8")
+    if len(encoded) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(f"password exceeds {BCRYPT_MAX_PASSWORD_BYTES} bytes")
     salt = bcrypt.gensalt(rounds=12)
-    return bcrypt.hashpw(plain.encode("utf-8"), salt).decode("utf-8")
+    return bcrypt.hashpw(encoded, salt).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Verify a plain-text password against a bcrypt hash."""
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    """Verify a plain-text password against a bcrypt hash.
+
+    Inputs over 72 bytes are truncated rather than raising: hashes created
+    under bcrypt<5 were silently truncated at hash time, so this is what
+    reproduces them — and a login attempt must never be a 500.
+    """
+    encoded = plain.encode("utf-8")[:BCRYPT_MAX_PASSWORD_BYTES]
+    try:
+        return bcrypt.checkpw(encoded, hashed.encode("utf-8"))
+    except ValueError:
+        # Malformed stored hash.
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +143,28 @@ def generate_api_key() -> str:
 def generate_subscription_token() -> str:
     """Generate a unique subscription token."""
     return secrets.token_urlsafe(32)
+
+
+def derive_proxy_uuid(subscription_token: str, node_id: int) -> str:
+    """
+    Per-(subscription, node) proxy credential: the VLESS/TUIC client UUID
+    and the Hysteria2 password.
+
+    Keyed by the subscription's own token (256 random bits, never exposed
+    except to its holder) so it cannot be computed by anyone else. The old
+    derivation, ``uuid5(NAMESPACE_DNS, f"{user_id}:{node_id}")``, had no
+    secret input at all — anyone holding one subscription could enumerate
+    every other user's credential from small integers, regenerating a
+    subscription never rotated it, and SQLite rowid reuse handed a deleted
+    user's credential to the next user created. Tying it to the token
+    fixes all three: a new token is a new credential.
+    """
+    digest = hmac.new(
+        subscription_token.encode("utf-8"),
+        f"mtgroup-proxy-uuid:{node_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return str(uuid.UUID(bytes=digest[:16], version=4))
 
 
 def generate_short_id() -> str:

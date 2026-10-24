@@ -45,10 +45,17 @@ async def db_engine():
     created here, but a previously-interrupted run can leave one behind,
     and a database stamped at head with no tables would make every
     subsequent test fail with "no such table".
+
+    The model tables are dropped *before* creating them as well, for the
+    same reason: teardown never runs for a run that was killed mid-test,
+    and `create_all` keeps existing tables (and their rows), so the first
+    test of the next run would otherwise inherit stale data — that showed
+    up as a spurious `UNIQUE constraint failed: agents.user_id`.
     """
     engine = create_db_engine(TEST_DB_URL)
     async with engine.begin() as conn:
         await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:

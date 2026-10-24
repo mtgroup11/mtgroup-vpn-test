@@ -149,24 +149,28 @@ class TrafficAccountingEngine:
         Reverse-maps Xray's `email` stat key back to a user_id.
 
         No email->user_id table exists, so this recomputes the same
-        deterministic per-(user, node) UUID subscriptions.py already uses
-        for VLESS client IDs (`_generate_user_uuid`) against every active
-        user and matches strings. O(active users) per node per health
-        check — acceptable at the 60s polling cadence this runs at, would
-        need revisiting at very large user counts.
+        per-(subscription, node) credential subscriptions.py hands out
+        (`derive_proxy_uuid`) for every active subscription of an active
+        user and matches strings. O(active subscriptions) per node per
+        health check — fine at the 60s polling cadence, would need
+        revisiting at very large user counts.
         """
         from sqlalchemy import select
 
-        from backend.app.api.subscriptions import _generate_user_uuid
-        from backend.app.models import User
+        from backend.app.core.security import derive_proxy_uuid
+        from backend.app.models import Subscription, User
 
         async with self._db_session_factory() as session:
-            result = await session.execute(select(User.id).where(User.is_active.is_(True)))
-            active_user_ids = [row[0] for row in result.all()]
+            result = await session.execute(
+                select(Subscription.token, Subscription.user_id)
+                .join(User, User.id == Subscription.user_id)
+                .where(Subscription.is_active.is_(True), User.is_active.is_(True))
+            )
+            active_subs = result.all()
 
         email_to_user = {
-            _generate_user_uuid(user_id, node.id): user_id
-            for user_id in active_user_ids
+            derive_proxy_uuid(token, node.id): user_id
+            for token, user_id in active_subs
         }
 
         for email, total_bytes in user_traffic.items():

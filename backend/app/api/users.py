@@ -19,12 +19,13 @@ from backend.app.core.config import settings
 from backend.app.core.logging_config import audit_logger
 from backend.app.core.security import generate_subscription_token, hash_password
 from backend.app.core.wireguard_peers import revoke_peers
-from backend.app.models import Subscription, User
+from backend.app.models import Subscription, User, UserRole
 from backend.app.schemas import (
     MessageResponse,
     UserCreate,
     UserListResponse,
     UserResponse,
+    UserRole as SchemaUserRole,
     UserUpdate,
 )
 
@@ -86,7 +87,17 @@ async def create_user(
 
     from backend.app.models import Agent
     agent_id = None
-    if current_user.role == "reseller":
+    if current_user.role == UserRole.RESELLER:
+        # Resellers may only create plain VPN users under their own agent.
+        # `role` used to be taken straight from the request body, so a
+        # reseller could mint an ADMIN account and take over the panel.
+        # Sub-resellers go through /api/resellers/sub-agents, which does
+        # the quota bookkeeping this endpoint doesn't.
+        if body.role != SchemaUserRole.USER:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Resellers can only create regular users",
+            )
         agent_res = await db.execute(select(Agent).where(Agent.user_id == current_user.id))
         agent = agent_res.scalar_one_or_none()
         if not agent:
@@ -149,7 +160,7 @@ async def list_users(
 
     base_query = select(User)
     
-    if current_user.role == "reseller":
+    if current_user.role == UserRole.RESELLER:
         # Find the agent id for this reseller
         agent_res = await db.execute(select(Agent).where(Agent.user_id == current_user.id))
         agent = agent_res.scalar_one_or_none()
@@ -385,6 +396,9 @@ async def regenerate_subscription(
     )
     old_sub_rows = old_subs.scalars().all()
     carried_protocols = old_sub_rows[0].protocols if old_sub_rows else json.dumps(settings.default_protocol_list)
+    # Carry the user's routing preference too — dropping it silently
+    # flipped Iran-bypass back to the model default on every regenerate.
+    carried_iran_bypass = old_sub_rows[0].iran_bypass if old_sub_rows else True
     for sub in old_sub_rows:
         sub.is_active = False
 
@@ -404,6 +418,7 @@ async def regenerate_subscription(
         user_id=user.id,
         token=generate_subscription_token(),
         protocols=carried_protocols,
+        iran_bypass=carried_iran_bypass,
     )
     db.add(new_sub)
     await db.commit()

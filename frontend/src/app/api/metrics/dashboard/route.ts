@@ -10,9 +10,14 @@
 // deployment. This route handler runs server-side only, so the token
 // (read from a non-NEXT_PUBLIC_ env var — never bundled into client JS)
 // can be attached here without ever reaching the browser.
+//
+// The backend endpoint additionally requires an admin JWT (node names and
+// fleet health are operational intel the shared stealth token alone must
+// not unlock), so the caller's Authorization header is forwarded as-is.
+// Without one the backend's 401 is passed straight through.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   const backendUrl = process.env.BACKEND_INTERNAL_URL;
   const stealthToken = process.env.STEALTH_TOKEN;
 
@@ -23,12 +28,20 @@ export async function GET() {
     );
   }
 
+  const authorization = request.headers.get("authorization");
+
   try {
     const res = await fetch(`${backendUrl}/api/metrics/dashboard`, {
-      headers: { "X-Stealth-Token": stealthToken },
+      headers: {
+        "X-Stealth-Token": stealthToken,
+        ...(authorization ? { Authorization: authorization } : {}),
+      },
       cache: "no-store",
     });
 
+    if (res.status === 401 || res.status === 403) {
+      return Response.json({ error: "admin login required" }, { status: res.status });
+    }
     if (!res.ok) {
       return Response.json({ error: `backend returned ${res.status}` }, { status: 502 });
     }

@@ -8,20 +8,22 @@ drop statistics for the HTML5 Canvas Radar UI.
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
 import psutil
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.auth import get_db
+from backend.app.api.auth import get_db, require_admin
+from backend.app.core.config import settings
+from backend.app.core.security import verify_access_token
 from backend.app.ebpf.loader import XDPLoader
-from backend.app.models import Node
+from backend.app.models import Node, User, UserRole
 
 logger = logging.getLogger("mtgroup.api.metrics")
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 # Global XDP Loader instance for stats
-xdp_loader = XDPLoader(interface="eth0")
+xdp_loader = XDPLoader(interface=settings.EBPF_INTERFACE)
 
 class ConnectionManager:
     def __init__(self):
@@ -110,11 +112,31 @@ manager = ConnectionManager()
 
 
 @router.websocket("/live")
-async def websocket_live_metrics(websocket: WebSocket):
+async def websocket_live_metrics(
+    websocket: WebSocket,
+    token: str = Query(default=""),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    WebSocket Endpoint: /api/metrics/live
-    Connect to this endpoint to receive real-time JSON metrics for the Radar UI.
+    WebSocket Endpoint: /api/metrics/live?token=<admin access JWT>
+
+    Browsers cannot set an Authorization header on a WebSocket handshake,
+    so the admin access token is passed as a query parameter and checked
+    (signature, expiry, active admin in DB) *before* the socket is
+    accepted. Unauthenticated sockets are closed with 1008.
     """
+    payload = verify_access_token(token) if token else None
+    user = None
+    if payload and payload.get("sub"):
+        try:
+            result = await db.execute(select(User).where(User.id == int(payload["sub"])))
+            user = result.scalar_one_or_none()
+        except (TypeError, ValueError):
+            user = None
+    if user is None or not user.is_active or user.role != UserRole.ADMIN:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await manager.connect(websocket)
     try:
         while True:
@@ -224,11 +246,16 @@ def _node_color(health_status: str) -> str:
 
 
 @router.get("/dashboard")
-async def get_metrics_dashboard(db: AsyncSession = Depends(get_db)):
+async def get_metrics_dashboard(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Endpoint: /api/metrics/dashboard
-    Returns durational awareness data for the Next.js frontend,
-    driven by real system telemetry and eBPF kernel maps.
+    Endpoint: /api/metrics/dashboard (admin only)
+
+    Every number here is measured — nothing is a placeholder. Where a
+    signal genuinely isn't available on this host (e.g. no BCC => no XDP
+    counters) the field says so instead of inventing a value.
     """
     from datetime import datetime, timezone
 
@@ -236,9 +263,16 @@ async def get_metrics_dashboard(db: AsyncSession = Depends(get_db)):
     # populated by NodeOrchestrator.check_node_health()'s health-poll loop
     # (orchestrator.py) — not fabricated here.
     result = await db.execute(select(Node).where(Node.is_active))
+    active_nodes = list(result.scalars().all())
     nodes = [
         {
+            "id": node.id,
             "name": node.name,
+            "protocol": node.protocol.value if node.protocol else None,
+            "health_status": node.health_status,
+            "last_health_check": node.last_health_check.isoformat() if node.last_health_check else None,
+            "current_connections": node.current_connections,
+            "max_connections": node.max_connections,
             "traffic": f"{node.current_connections} conns",
             "percent": (
                 # max_connections == 0 means unlimited on this node — no
@@ -250,67 +284,71 @@ async def get_metrics_dashboard(db: AsyncSession = Depends(get_db)):
             ),
             "color": _node_color(node.health_status),
         }
-        for node in result.scalars().all()
+        for node in active_nodes
     ]
+    healthy_nodes = sum(1 for n in active_nodes if n.health_status == "healthy")
 
-    # 1. Real eBPF Telemetry
+    # 1. eBPF telemetry — only trusted when it isn't XDPLoader's simulation.
     xdp_stats = xdp_loader.get_stats()
-    ebpf_bans = xdp_stats.get("active_bans", 0) if isinstance(xdp_stats, dict) else 0
-    
-    ebpf_status = "Online" if not xdp_stats.get("simulated", True) else "Degraded/Offline (Simulation)"
-    if xdp_stats.get("error"):
+    simulated = bool(xdp_stats.get("simulated", True)) if isinstance(xdp_stats, dict) else True
+    ebpf_bans = 0 if simulated else int(xdp_stats.get("active_bans", 0) or 0)
+    if not settings.EBPF_ENABLED:
+        ebpf_status = "Disabled"
+    elif xdp_stats.get("error"):
         ebpf_status = f"Error: {xdp_stats['error']}"
-    
-    # 2. Real System Resources
+    elif simulated:
+        ebpf_status = "Unavailable (BCC not installed)"
+    else:
+        ebpf_status = "Online"
+
+    # 2. System resources
     cpu_usage = psutil.cpu_percent(interval=None)
     ram_usage = psutil.virtual_memory().percent
-    
-    # 3. Calculate Active Users via OS Socket Tracking
-    active_users = 0
-    try:
-        # Safely attempt to read active TCP connections on VPN ports
-        connections = psutil.net_connections(kind="tcp")
-        active_users = sum(
-            1 for c in connections 
-            if c.status == 'ESTABLISHED' and c.laddr and c.laddr.port in (443, 8443, 8080)
-        )
-    except Exception as e:
-        logger.warning(f"Could not read net connections for active_users: {e}")
-        # Fallback if permission denied
-        active_users = 0
-    
-    # These metrics require advanced log aggregation (e.g. vector/fluentbit), 
-    # so we'll keep them as safe defaults for the API baseline.
-    honeypot_triggers = 0 
-    failed_handshake_rate = 0.0
-    latency_ms = 45.0
-    packet_loss_pct = 0.0
-    handshake_success_rate = 100.0
-    
+
+    # 3. Users (DB is the source of truth)
+    total_users = (await db.execute(
+        select(func.count()).select_from(User).where(User.role == UserRole.USER)
+    )).scalar() or 0
+    active_users = (await db.execute(
+        select(func.count()).select_from(User).where(User.role == UserRole.USER, User.is_active)
+    )).scalar() or 0
+
+    # 4. Honeypot lethal-decoy hits since startup
+    from backend.app.core.honeypot import honeypot
+    honeypot_triggers = honeypot.trigger_count
+
     risk_score, risk_status = calculate_system_risk_score(
-        ebpf_bans, honeypot_triggers, cpu_usage, ram_usage, failed_handshake_rate
+        ebpf_bans, honeypot_triggers, cpu_usage, ram_usage, 0.0
     )
-    
-    connection_quality = calculate_connection_quality(
-        latency_ms, packet_loss_pct, handshake_success_rate
-    )
-    
+
+    # Fleet availability: share of active nodes whose last health poll
+    # succeeded. A measured stand-in for "connection quality" — the old
+    # value was computed from hardcoded latency/loss constants.
+    connection_quality = round(healthy_nodes / len(active_nodes) * 100) if active_nodes else 0
+
     # Trigger shield if necessary
     if risk_score > 75:
         await trigger_autonomous_shield(risk_score)
-        
+
     return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "risk_score": risk_score,
         "risk_status": risk_status,
         "connection_quality": connection_quality,
         "incident_timeline": [
             {
-                "time": datetime.now(timezone.utc).strftime("%H:%M"), 
-                "action": "SYSTEM_HEARTBEAT", 
+                "time": datetime.now(timezone.utc).strftime("%H:%M"),
+                "action": "SYSTEM_HEARTBEAT",
                 "details": f"CPU: {cpu_usage}%, RAM: {ram_usage}%"
             }
         ],
+        "system": {"cpu_percent": cpu_usage, "ram_percent": ram_usage},
         "ebpf_status": ebpf_status,
+        "ebpf_active_bans": ebpf_bans,
+        "honeypot_triggers": honeypot_triggers,
+        "total_users": total_users,
         "active_users": active_users,
+        "healthy_nodes": healthy_nodes,
+        "total_active_nodes": len(active_nodes),
         "nodes": nodes,
     }

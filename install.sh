@@ -146,12 +146,16 @@ fi
 if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
     mkdir -p "$AWG_CONF_DIR"
 
-    if [ -f "$AWG_CONF" ]; then
+    if [ -f "$AWG_CONF" ] && [ "$FORCE" -eq 0 ]; then
         echo "Existing AmneziaWG config found at $AWG_CONF — leaving it untouched."
         AWG_PRIVATE_KEY=$(grep '^PrivateKey' "$AWG_CONF" | head -1 | cut -d'=' -f2- | tr -d ' ')
         AWG_PUBLIC_KEY=$(echo "$AWG_PRIVATE_KEY" | awg pubkey 2>/dev/null || true)
     else
-        echo "Provisioning new AmneziaWG interface ($AWG_SUBNET, port $AWG_LISTEN_PORT)..."
+        if [ -f "$AWG_CONF" ]; then
+            echo "⚠️ --force used. Overwriting existing AmneziaWG config at $AWG_CONF."
+        else
+            echo "Provisioning new AmneziaWG interface ($AWG_SUBNET, port $AWG_LISTEN_PORT)..."
+        fi
 
         # Values below (Jc/Jmin/Jmax/S1/S2/H1-H4, and the subnet unless
         # overridden) match backend/app/models.py's Node column defaults
@@ -204,7 +208,11 @@ EOF
         fi
     fi
 
-    systemctl enable --now "awg-quick@awg0" || echo "⚠️ Failed to start awg-quick@awg0 — check 'journalctl -u awg-quick@awg0'."
+    if systemctl is-active --quiet "awg-quick@awg0"; then
+        systemctl restart "awg-quick@awg0" || echo "⚠️ Failed to restart awg-quick@awg0 — check 'journalctl -u awg-quick@awg0'."
+    else
+        systemctl enable --now "awg-quick@awg0" || echo "⚠️ Failed to start awg-quick@awg0 — check 'journalctl -u awg-quick@awg0'."
+    fi
 
     if [ "$WATCHDOG_ARMED" -eq 1 ]; then
         echo "Watchdog armed for 60s: verify you still have SSH access from a FRESH connection (not this session), or run backend/scripts/watchdog-client.sh, to confirm and disarm — otherwise this change rolls back automatically."
@@ -268,6 +276,19 @@ if [ -f "$ENV_FILE" ] && [ "$FORCE" -eq 0 ]; then
     
     # Still update EBPF_ENABLED depending on our test result
     sed -i "s/^EBPF_ENABLED=.*/EBPF_ENABLED=$EBPF_ENABLED/" $ENV_FILE
+
+    # Older installs never generated STEALTH_TOKEN, so they run with the
+    # placeholder from the public .env.example. The backend now refuses to
+    # boot with it; replace it here so an upgrade doesn't brick the panel.
+    if ! grep -q "^STEALTH_TOKEN=" $ENV_FILE || grep -q "^STEALTH_TOKEN=\(CHANGE_ME.*\)\?$" $ENV_FILE; then
+        STEALTH_TOKEN_NEW=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        if grep -q "^STEALTH_TOKEN=" $ENV_FILE; then
+            sed -i "s/^STEALTH_TOKEN=.*/STEALTH_TOKEN=$STEALTH_TOKEN_NEW/" $ENV_FILE
+        else
+            echo "STEALTH_TOKEN=$STEALTH_TOKEN_NEW" >> $ENV_FILE
+        fi
+        echo "Generated a new STEALTH_TOKEN (the old value was the public placeholder)."
+    fi
     
     # Idempotency check: If REALITY_PUBLIC_KEY is entirely missing from .env, append it.
     if ! grep -q "^REALITY_PUBLIC_KEY=" $ENV_FILE; then
@@ -290,12 +311,14 @@ else
     ADMIN_PASS=$(python3 -c "import secrets; print(secrets.token_urlsafe(16))")
     JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
     DB_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+    STEALTH_TOKEN_NEW=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
     
     generate_reality_keys
 
     sed -i "s/CHANGE_ME_SECURE_PASSWORD/$ADMIN_PASS/" $ENV_FILE
     sed -i "s/CHANGE_ME_TO_A_RANDOM_64_CHAR_STRING/$JWT_SECRET/" $ENV_FILE
     sed -i "s/^DB_ENCRYPTION_KEY=.*/DB_ENCRYPTION_KEY=$DB_KEY/" $ENV_FILE
+    sed -i "s/^STEALTH_TOKEN=.*/STEALTH_TOKEN=$STEALTH_TOKEN_NEW/" $ENV_FILE
     sed -i "s/^EBPF_ENABLED=.*/EBPF_ENABLED=$EBPF_ENABLED/" $ENV_FILE
     
     # In .env.example they are just placeholders, we can replace or append.

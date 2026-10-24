@@ -1,8 +1,9 @@
 import contextlib
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
 import asyncio
 import hmac
@@ -18,8 +19,67 @@ from backend.app.core.routing_engine import SNIMultiplexer
 from backend.app.core.accounting import TrafficAccountingEngine
 from backend.app.orchestrator import orchestrator
 from backend.app.models import create_db_engine, create_session_factory, init_db
-from backend.app.api.auth import get_db
+from backend.app.api.auth import get_db, require_admin
+from backend.app.core.logging_config import audit_logger
+from backend.app.core.stealth import nginx_404 as _nginx_404
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Client-facing subscription URLs. VPN clients (v2rayN, Clash, sing-box,
+# Streisand, ...) fetch these with a plain GET and cannot attach custom
+# headers, so they must bypass the X-Stealth-Token gate — the unguessable
+# 256-bit subscription token in the path is their credential instead.
+# Must match the literal prefix used by api/subscriptions.py's routes.
+_SUBSCRIPTION_PUBLIC_PREFIX = "/sub/"
+
+
+def _enforce_production_secrets() -> None:
+    """Refuse to boot with missing/weak secrets when DEBUG is off.
+
+    Each of these, left at its default, is a full compromise on its own:
+    DB_ENCRYPTION_KEY protects every encrypted column, ADMIN_PASSWORD is
+    the seeded admin login, STEALTH_TOKEN is the only thing hiding the API,
+    and JWT_SECRET_KEY signs every session. JWT_SECRET_KEY's default is a
+    random per-process value — "secure" but useless in production, because
+    every restart logs everyone out and each uvicorn worker would sign with
+    a different key, so tokens fail at random depending on which worker
+    serves the request.
+    """
+    if settings.DEBUG:
+        return
+    problems: list[str] = []
+
+    def _placeholder(value: str) -> bool:
+        # .env.example ships `CHANGE_ME...` values that are long enough to
+        # pass every length check below — and are public in the repo. A
+        # README-style `cp .env.example .env` used to boot in production
+        # with a known JWT secret, i.e. anyone could mint admin tokens.
+        return value.strip().upper().startswith("CHANGE_ME")
+
+    if (not settings.DB_ENCRYPTION_KEY
+            or settings.DB_ENCRYPTION_KEY == "mtgroup-vpn-ultimate-default-dev-key-CHANGE-ME"
+            or _placeholder(settings.DB_ENCRYPTION_KEY)):
+        problems.append("DB_ENCRYPTION_KEY is empty or the shipped default")
+    if (not settings.ADMIN_PASSWORD or settings.ADMIN_PASSWORD == "MTGroup@2024!Secure"
+            or _placeholder(settings.ADMIN_PASSWORD)):
+        problems.append("ADMIN_PASSWORD is empty or the shipped default")
+    elif len(settings.ADMIN_PASSWORD) < 12:
+        problems.append("ADMIN_PASSWORD must be at least 12 characters")
+    if not settings.STEALTH_TOKEN or _placeholder(settings.STEALTH_TOKEN):
+        problems.append("STEALTH_TOKEN is empty or the shipped placeholder")
+    elif len(settings.STEALTH_TOKEN) < 24:
+        problems.append("STEALTH_TOKEN must be at least 24 characters")
+    if "JWT_SECRET_KEY" not in settings.model_fields_set:
+        problems.append("JWT_SECRET_KEY is not set (a random per-process key breaks sessions across restarts/workers)")
+    elif _placeholder(settings.JWT_SECRET_KEY):
+        problems.append("JWT_SECRET_KEY is the shipped placeholder")
+    elif len(settings.JWT_SECRET_KEY) < 32:
+        problems.append("JWT_SECRET_KEY must be at least 32 characters")
+    if problems:
+        raise RuntimeError(
+            "CRITICAL: refusing to start in PRODUCTION (DEBUG=False): "
+            + "; ".join(problems)
+            + ". Fix your .env (see .env.example) and restart."
+        )
 
 try:
     from bcc import BPF  # type: ignore
@@ -31,19 +91,14 @@ bpf_instance = None
 hopper_engine = None
 ai_engine = None
 db_session_factory = None
+telegram_engine = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bpf_instance, hopper_engine, ai_engine, db_session_factory
+    global bpf_instance, hopper_engine, ai_engine, db_session_factory, telegram_engine
     logging.info("🚀 XDP-Spectre Central Orchestrator Booting...")
-    
-    if not settings.DEBUG:
-        if not settings.DB_ENCRYPTION_KEY or settings.DB_ENCRYPTION_KEY == "mtgroup-vpn-ultimate-default-dev-key-CHANGE-ME":
-            raise RuntimeError("CRITICAL: DB_ENCRYPTION_KEY is empty or default in PRODUCTION (DEBUG=False). Set a secure key to start.")
-        if not settings.ADMIN_PASSWORD or settings.ADMIN_PASSWORD == "MTGroup@2024!Secure":
-            raise RuntimeError("CRITICAL: ADMIN_PASSWORD is empty or default in PRODUCTION (DEBUG=False). Set a secure password to start.")
-        if not settings.STEALTH_TOKEN:
-            raise RuntimeError("CRITICAL: STEALTH_TOKEN is empty in PRODUCTION (DEBUG=False). Set a secure token to start.")
+
+    _enforce_production_secrets()
     
     if HAS_BCC and getattr(settings, 'EBPF_ENABLED', False):
         try:
@@ -54,8 +109,7 @@ async def lifespan(app: FastAPI):
             logging.info("Compiling and loading XDP-Spectre BPF module...")
             bpf_instance = BPF(text=bpf_text)
             
-            # Attach to dummy interface for now, in real deployment use config.settings.IFACE
-            iface = getattr(settings, 'IFACE', "eth0")
+            iface = settings.EBPF_INTERFACE
             try:
                 fn = bpf_instance.load_func("xdp_spectre_prog", BPF.XDP)
                 bpf_instance.attach_xdp(iface, fn, 0)
@@ -212,7 +266,23 @@ async def lifespan(app: FastAPI):
 
     await asyncio.gather(*tasks)
 
+    # Telegram bot. Started last and isolated: a bad token or Telegram
+    # being unreachable from this host (common in censored networks) must
+    # never take the panel down with it.
+    from backend.app.telegram_bot import SingularityTelegramBot
+    telegram_engine = SingularityTelegramBot(db_session_factory)
+    try:
+        await telegram_engine.start()
+    except Exception:
+        logging.exception("Telegram bot failed to start; continuing without it.")
+
     yield
+
+    if telegram_engine is not None:
+        try:
+            await telegram_engine.stop()
+        except Exception:
+            logging.exception("Telegram bot failed to stop cleanly.")
 
     logging.info(" Shutting down gracefully...")
     stop_tasks = [honeypot.stop(), orchestrator.stop()]
@@ -235,7 +305,7 @@ async def lifespan(app: FastAPI):
     
     if HAS_BCC and bpf_instance:
         try:
-            iface = getattr(settings, 'IFACE', "eth0")
+            iface = settings.EBPF_INTERFACE
             bpf_instance.remove_xdp(iface, 0)
             logging.info(f"Detached XDP program from {iface}")
         except Exception:
@@ -273,52 +343,83 @@ app.include_router(system_router)
 app.include_router(metrics_router)
 app.include_router(resellers_router) 
 
-# Stealth Middleware
+# Subscription URLs bypass the stealth gate (see above), so any framework-
+# generated error under /sub/ would otherwise leak FastAPI's JSON body —
+# `GET /sub/<random>` returning `{"detail": ...}` while every other path
+# returns nginx HTML is a one-request fingerprint. "No such token / no such
+# route / wrong method / malformed path" all collapse into the nginx 404.
+# Errors that need a *valid* token to reach (expired, over quota, no nodes)
+# keep their JSON detail — only the token's holder can see those.
+_SUB_STEALTH_STATUSES = {404, 405, 422}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if request.url.path.startswith(_SUBSCRIPTION_PUBLIC_PREFIX) and exc.status_code in _SUB_STEALTH_STATUSES:
+        return _nginx_404()
+    from fastapi.exception_handlers import http_exception_handler
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith(_SUBSCRIPTION_PUBLIC_PREFIX):
+        return _nginx_404()
+    from fastapi.exception_handlers import request_validation_exception_handler
+    return await request_validation_exception_handler(request, exc)
+
+
+# Stealth Middleware (registered last => outermost => runs first)
 @app.middleware("http")
 async def stealth_middleware(request: Request, call_next):
-    # App-level IP Ban kontrolü (eBPF kapalıysa Honeypot cezası buraya düşer)
-    if orchestrator.is_app_banned(request.client.host):
-        return JSONResponse(status_code=403, content={"detail": "Forbidden (App-Level Ban)"})
-        
-    # Gelen isteklerde 'X-Stealth-Token' header kontrolü (config'den, sabit değil)
+    client_ip = request.client.host if request.client else "unknown"
+
+    # App-level IP ban (honeypot / manual bans land here when eBPF is off).
+    # Banned clients get the same nginx 404 as everyone else rather than a
+    # telltale 403 that confirms they were detected.
+    if orchestrator.is_app_banned(client_ip):
+        return _nginx_404()
+
+    # Subscription URLs are authenticated by their own path token.
+    if request.url.path.startswith(_SUBSCRIPTION_PUBLIC_PREFIX):
+        return await call_next(request)
+
     token = request.headers.get("X-Stealth-Token") or ""
-    if not settings.STEALTH_TOKEN or not hmac.compare_digest(token, settings.STEALTH_TOKEN):
-        # Sıradan projelere ve tarayıcılara kendini gizle
-        logging.warning(f"Unauthorized access attempt from {request.client.host}")
-        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    if not settings.STEALTH_TOKEN or not hmac.compare_digest(
+        token.encode("utf-8"), settings.STEALTH_TOKEN.encode("utf-8")
+    ):
+        logging.debug("Stealth gate rejected %s %s from %s", request.method, request.url.path, client_ip)
+        return _nginx_404()
     return await call_next(request)
 
+
+# Kernel-level kill switch / global port hop. These can drop every non-VPN
+# packet on the host, so they require an authenticated admin JWT on top of
+# the stealth token — the stealth token alone is a shared secret that also
+# lives in the frontend container and must not be sufficient to cut traffic.
 @app.post("/api/v1/system/killswitch/trigger")
-async def api_trigger_killswitch():
+async def api_trigger_killswitch(admin=Depends(require_admin)):
     await killswitch.trigger_lockdown()
+    audit_logger.log_admin_action(admin_username=admin.username, action="killswitch_trigger", target="host")
     return {"status": "lockdown_active", "message": "All non-VPN traffic is now DROPPED at XDP layer."}
 
 @app.post("/api/v1/system/killswitch/release")
-async def api_release_killswitch():
+async def api_release_killswitch(admin=Depends(require_admin)):
     await killswitch.release_lockdown()
+    audit_logger.log_admin_action(admin_username=admin.username, action="killswitch_release", target="host")
     return {"status": "lockdown_released", "message": "Traffic flowing normally."}
 
 @app.post("/api/v1/system/porthop/trigger")
-async def api_trigger_porthop():
-    if not hopper_engine:
-        return {"status": "error", "message": "Hopper engine not running"}
+async def api_trigger_porthop(admin=Depends(require_admin)):
+    if not hopper_engine or not settings.EBPF_ENABLED:
+        return {"status": "error", "message": "Hopper engine not running (EBPF_ENABLED is false)"}
     new_port = hopper_engine.hopper.force_hop()
+    audit_logger.log_admin_action(admin_username=admin.username, action="porthop_trigger", target=str(new_port))
     return {"status": "porthop_active", "new_port": new_port, "message": f"Global port hop triggered. New port: {new_port}"}
 
 @app.get("/health")
 @app.get("/api/v1/health")
 async def health_check():
-    import random
-    # Return mock telemetry data blended with real killswitch state
-    return {
-        "status": "healthy",
-        "killswitch_active": killswitch.active,
-        "nodes": [
-            {"name": "Node-IR-01 (Tehran)", "traffic": f"{random.randint(400, 500)} Mbps", "percent": random.randint(40, 50), "color": "blue"},
-            {"name": "Node-CN-04 (Beijing)", "traffic": f"{random.randint(50, 100)} Mbps", "percent": random.randint(10, 20), "color": "blue"},
-            {"name": "Node-RU-02 (Moscow)", "traffic": f"1.{random.randint(1, 4)} Gbps", "percent": random.randint(85, 95), "color": "red"}
-        ],
-        "anomalies": [
-            {"ip": f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}", "score": round(random.uniform(0.85, 0.99), 2), "action": "BLOCKED"}
-        ]
-    }
+    """Liveness probe. Deliberately reveals nothing beyond "up" — node
+    telemetry lives behind admin auth at /api/metrics/dashboard."""
+    return {"status": "healthy"}

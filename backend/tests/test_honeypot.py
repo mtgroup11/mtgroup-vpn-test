@@ -101,6 +101,7 @@ class TestHandleClient:
         assert call_args.args[0] == "203.0.113.99"
         assert "LETHAL_PROBE" in call_args.args[1]
         assert bytes(writer.written).startswith(b"HTTP/1.1 404 Not Found")
+        assert engine.trigger_count == 1
 
     @pytest.mark.asyncio
     async def test_backup_sql_probe_triggers_lethal_ban(self, monkeypatch):

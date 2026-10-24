@@ -6,20 +6,27 @@ Endpoints for managing multi-tier agents and quota allocations.
 
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import get_current_user, get_db
 from backend.app.models import Agent, User, UserRole
+from backend.app.schemas import validate_password_bytes
 
 router = APIRouter(prefix="/api/resellers", tags=["resellers"])
 
 
 class SubAgentCreate(BaseModel):
-    username: str
-    password: str
-    traffic_quota_mb: int
+    username: str = Field(..., min_length=3, max_length=128)
+    password: str = Field(..., min_length=8)
+    # Strictly positive: the quota is deducted from the parent with `+=`,
+    # so a negative value used to *refund* the parent — any reseller could
+    # grant itself unlimited quota by creating a sub-agent with -10^9 MB.
+    # Upper bound (1 PB) keeps the byte product far inside SQLite's int64.
+    traffic_quota_mb: int = Field(..., gt=0, le=1_000_000_000)
+
+    _check_password = field_validator("password")(validate_password_bytes)
 
 
 @router.post("/sub-agents", status_code=status.HTTP_201_CREATED)
@@ -38,6 +45,8 @@ async def create_sub_agent(
 
     if not parent_agent and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=404, detail="Agent profile not found")
+    if parent_agent and not parent_agent.is_active:
+        raise HTTPException(status_code=403, detail="Agent account is suspended")
 
     quota_bytes = request.traffic_quota_mb * 1024 * 1024
 

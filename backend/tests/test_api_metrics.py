@@ -21,6 +21,7 @@ from backend.app.api.metrics import (
     calculate_system_risk_score,
     trigger_autonomous_shield,
 )
+from backend.tests.conftest import get_admin_token
 
 
 class TestCalculateSystemRiskScore:
@@ -222,48 +223,71 @@ class TestConnectionManager:
 
 
 class TestDashboard:
+    @staticmethod
+    async def _auth(client):
+        return {"Authorization": f"Bearer {await get_admin_token(client)}"}
+
     @pytest.mark.asyncio
     async def test_returns_expected_shape(self, client):
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
         body = resp.json()
         assert "risk_score" in body
         assert 0 <= body["risk_score"] <= 100
 
     @pytest.mark.asyncio
-    async def test_no_auth_required(self, client):
-        # Matches the endpoint's actual dependency list (none) — the
-        # panel dashboard polls this without a bearer token today.
+    async def test_requires_admin_token(self, client):
+        # Node names/addresses and fleet health are operational intel —
+        # the stealth token alone (shared with the frontend container) is
+        # not enough to read them.
         resp = await client.get("/api/metrics/dashboard")
-        assert resp.status_code != 401
-        assert resp.status_code != 403
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_still_requires_stealth_token(self, client):
-        no_stealth = client.headers.copy()
-        no_stealth.pop("X-Stealth-Token", None)
         resp = await client.get("/api/metrics/dashboard", headers={"X-Stealth-Token": "wrong-token"})
         assert resp.status_code == 404  # stealth_middleware disguises itself as a generic 404
 
     @pytest.mark.asyncio
     async def test_ebpf_error_status_surfaces_in_response(self, client, monkeypatch):
+        monkeypatch.setattr("backend.app.api.metrics.settings.EBPF_ENABLED", True)
         monkeypatch.setattr(
             "backend.app.api.metrics.xdp_loader.get_stats",
             MagicMock(return_value={"error": "BPF map read failed", "simulated": True}),
         )
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
         assert resp.json()["ebpf_status"] == "Error: BPF map read failed"
 
     @pytest.mark.asyncio
-    async def test_net_connections_permission_error_falls_back_to_zero_active_users(self, client, monkeypatch):
+    async def test_ebpf_disabled_is_reported_as_disabled(self, client, monkeypatch):
+        monkeypatch.setattr("backend.app.api.metrics.settings.EBPF_ENABLED", False)
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
+        assert resp.json()["ebpf_status"] == "Disabled"
+
+    @pytest.mark.asyncio
+    async def test_simulated_xdp_bans_are_not_reported(self, client, monkeypatch):
         monkeypatch.setattr(
-            "backend.app.api.metrics.psutil.net_connections",
-            MagicMock(side_effect=PermissionError("not allowed")),
+            "backend.app.api.metrics.xdp_loader.get_stats",
+            MagicMock(return_value={"active_bans": 999, "simulated": True}),
         )
-        resp = await client.get("/api/metrics/dashboard")
-        assert resp.status_code == 200
-        assert resp.json()["active_users"] == 0
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
+        assert resp.json()["ebpf_active_bans"] == 0
+
+    @pytest.mark.asyncio
+    async def test_user_counts_come_from_db(self, client, db_session):
+        from backend.app.core.security import hash_password
+        from backend.app.models import User, UserRole
+        db_session.add_all([
+            User(username="u-active", hashed_password=hash_password("x" * 8), role=UserRole.USER, is_active=True),
+            User(username="u-off", hashed_password=hash_password("x" * 8), role=UserRole.USER, is_active=False),
+        ])
+        await db_session.commit()
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
+        body = resp.json()
+        # The seeded admin is not a VPN user and must not be counted.
+        assert body["total_users"] == 2
+        assert body["active_users"] == 1
 
     @pytest.mark.asyncio
     async def test_critical_risk_score_triggers_autonomous_shield(self, client, monkeypatch):
@@ -276,29 +300,32 @@ class TestDashboard:
         shield_mock = AsyncMock()
         monkeypatch.setattr("backend.app.api.metrics.trigger_autonomous_shield", shield_mock)
 
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
         assert resp.json()["risk_score"] > 75
         shield_mock.assert_awaited_once_with(resp.json()["risk_score"])
 
     @pytest.mark.asyncio
     async def test_includes_real_active_node_load(self, client, db_session, seed_node):
-        # TrafficGraph on the frontend renders exactly this shape — real
-        # DB-backed load, not fabricated, per health-poll-populated
-        # current_connections/max_connections/health_status. `client`
-        # already seeds one default active node ("test-node"); seed_node
-        # adds a second ("test-node-1") with values set below.
+        # TrafficGraph on the frontend renders this — real DB-backed load
+        # populated by the health poll. `client` already seeds one default
+        # active node ("test-node"); seed_node adds "test-node-1".
         seed_node.current_connections = 45
         seed_node.max_connections = 90
         seed_node.health_status = "healthy"
         await db_session.commit()
 
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
-        nodes = {n["name"]: n for n in resp.json()["nodes"]}
-        assert nodes["test-node-1"] == {
-            "name": "test-node-1", "traffic": "45 conns", "percent": 50, "color": "emerald"
-        }
+        body = resp.json()
+        node = {n["name"]: n for n in body["nodes"]}["test-node-1"]
+        assert node["traffic"] == "45 conns"
+        assert node["percent"] == 50
+        assert node["color"] == "emerald"
+        assert node["health_status"] == "healthy"
+        assert body["healthy_nodes"] == 1
+        assert body["total_active_nodes"] == 2
+        assert body["connection_quality"] == 50
 
     @pytest.mark.asyncio
     async def test_unlimited_node_capacity_reports_zero_percent_not_a_crash(self, client, db_session, seed_node):
@@ -306,7 +333,7 @@ class TestDashboard:
         seed_node.max_connections = 0  # 0 = unlimited on this node
         await db_session.commit()
 
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
         nodes = {n["name"]: n for n in resp.json()["nodes"]}
         assert nodes["test-node-1"]["percent"] == 0
@@ -316,7 +343,7 @@ class TestDashboard:
         seed_node.is_active = False
         await db_session.commit()
 
-        resp = await client.get("/api/metrics/dashboard")
+        resp = await client.get("/api/metrics/dashboard", headers=await self._auth(client))
         assert resp.status_code == 200
         names = {n["name"] for n in resp.json()["nodes"]}
         assert "test-node-1" not in names

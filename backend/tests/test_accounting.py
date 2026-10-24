@@ -567,8 +567,8 @@ class TestIngestAmneziaTraffic:
 
 @pytest_asyncio.fixture
 async def xray_traffic_env(db_engine):
-    from backend.app.api.subscriptions import _generate_user_uuid
-    from backend.app.models import NodeProtocol, create_session_factory
+    from backend.app.core.security import derive_proxy_uuid
+    from backend.app.models import NodeProtocol, Subscription, create_session_factory
 
     factory = create_session_factory(db_engine)
     async with factory() as session:
@@ -576,20 +576,25 @@ async def xray_traffic_env(db_engine):
         inactive_user = User(username="xray-inactive-user", hashed_password=hash_password("Pw123456!"), is_active=False)
         node = Node(name="xray-traffic-node", address="10.0.0.21", protocol=NodeProtocol.VLESS_REALITY)
         session.add_all([user, inactive_user, node])
+        await session.flush()
+        session.add_all([
+            Subscription(user_id=user.id, token="tok-active-user"),
+            Subscription(user_id=inactive_user.id, token="tok-inactive-user"),
+            Subscription(user_id=user.id, token="tok-revoked", is_active=False),
+        ])
         await session.commit()
         await session.refresh(user)
-        await session.refresh(inactive_user)
         await session.refresh(node)
-        user_id, inactive_user_id, node_obj = user.id, inactive_user.id, node
+        user_id, node_obj = user.id, node
 
-    email = _generate_user_uuid(user_id, node_obj.id)
-    return TrafficAccountingEngine(db_session_factory=factory), user_id, inactive_user_id, node_obj, email
+    email = derive_proxy_uuid("tok-active-user", node_obj.id)
+    return TrafficAccountingEngine(db_session_factory=factory), user_id, node_obj, email
 
 
 class TestIngestXrayTraffic:
     @pytest.mark.asyncio
-    async def test_maps_email_to_user_via_deterministic_uuid_and_buffers(self, xray_traffic_env):
-        engine, user_id, _inactive_id, node, email = xray_traffic_env
+    async def test_maps_email_to_user_via_subscription_credential_and_buffers(self, xray_traffic_env):
+        engine, user_id, node, email = xray_traffic_env
 
         await engine._ingest_xray_traffic(node, {email: 12345})
 
@@ -597,24 +602,29 @@ class TestIngestXrayTraffic:
 
     @pytest.mark.asyncio
     async def test_inactive_users_are_not_matched(self, xray_traffic_env):
-        """
-        Only active users are candidates for reverse-mapping — an inactive
-        user's uuid5 for this node would never legitimately appear in a
-        node's stats (nothing provisions inbound clients for suspended
-        users), so excluding them narrows the search space too.
-        """
-        from backend.app.api.subscriptions import _generate_user_uuid
+        """Only active users are candidates for reverse-mapping — a suspended
+        user's credential should never legitimately show up in node stats."""
+        from backend.app.core.security import derive_proxy_uuid
 
-        engine, _user_id, inactive_user_id, node, _email = xray_traffic_env
-        inactive_email = _generate_user_uuid(inactive_user_id, node.id)
+        engine, _user_id, node, _email = xray_traffic_env
 
-        await engine._ingest_xray_traffic(node, {inactive_email: 999})
+        await engine._ingest_xray_traffic(node, {derive_proxy_uuid("tok-inactive-user", node.id): 999})
+
+        assert engine._traffic_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_revoked_subscription_credentials_are_not_matched(self, xray_traffic_env):
+        from backend.app.core.security import derive_proxy_uuid
+
+        engine, _user_id, node, _email = xray_traffic_env
+
+        await engine._ingest_xray_traffic(node, {derive_proxy_uuid("tok-revoked", node.id): 999})
 
         assert engine._traffic_buffer == {}
 
     @pytest.mark.asyncio
     async def test_unrecognized_email_is_ignored(self, xray_traffic_env):
-        engine, _user_id, _inactive_id, node, _email = xray_traffic_env
+        engine, _user_id, node, _email = xray_traffic_env
 
         await engine._ingest_xray_traffic(node, {"not-a-real-uuid": 999})
 
@@ -632,7 +642,7 @@ class TestIngestNodeTraffic:
 
     @pytest.mark.asyncio
     async def test_dispatches_xray_traffic(self, xray_traffic_env):
-        engine, user_id, _inactive_id, node, email = xray_traffic_env
+        engine, user_id, node, email = xray_traffic_env
 
         await engine.ingest_node_traffic(node, {"xray_user_traffic": {email: 42}})
 

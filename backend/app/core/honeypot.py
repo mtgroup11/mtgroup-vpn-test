@@ -73,6 +73,9 @@ class HoneypotEngine:
         self.port = port if port is not None else getattr(settings, 'HONEYPOT_PORT', 8080)
         self._server = None
         self._is_running = False
+        # Number of lethal-decoy hits since startup. Read by the metrics
+        # dashboard; in-memory only, resets on restart.
+        self.trigger_count = 0
         self._cert_path = None
         self._key_path = None
 
@@ -150,6 +153,7 @@ class HoneypotEngine:
                     # itself on EBPF_ENABLED meant probes were never banned
                     # at all when eBPF was disabled, silently defeating the
                     # "lethal" honeypot with no error or warning.
+                    self.trigger_count += 1
                     await orchestrator.handle_security_alert(addr[0], reason)
 
                 response = NGINX_404_RESPONSE.replace(b"{date}", current_date)
