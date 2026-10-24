@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from backend.app.core import node_user_sync as nus
 from backend.app.core.security import derive_proxy_uuid, hash_password
@@ -211,3 +212,79 @@ async def test_end_to_end_against_the_real_agent(db_engine, tmp_path, monkeypatc
     written = json.loads(cfg_path.read_text(encoding="utf-8"))
     ids = {c["id"] for i in written["inbounds"] if i["protocol"] == "vless" for c in i["settings"]["clients"]}
     assert ids == {derive_proxy_uuid(tokens["ok"], node.id)}
+
+
+async def _seed_awg(factory):
+    async with factory() as s:
+        node = Node(name="awg-1", address="10.0.0.40", port=51820, protocol=NodeProtocol.AMNEZIA_WG,
+                    amnezia_server_public_key="srv", agent_cert_pem="PEM")
+        ok_user = User(username="awg-ok", hashed_password="x")
+        exp_user = User(username="awg-expired", hashed_password="x",
+                        expire_date=datetime.now(timezone.utc) - timedelta(days=1))
+        s.add_all([node, ok_user, exp_user])
+        await s.flush()
+        ok_sub = Subscription(user_id=ok_user.id, token="awg-ok-tok")
+        exp_sub = Subscription(user_id=exp_user.id, token="awg-exp-tok")
+        s.add_all([ok_sub, exp_sub])
+        await s.flush()
+        from backend.app.models import WireGuardPeer
+        s.add_all([
+            WireGuardPeer(subscription_id=ok_sub.id, node_id=node.id, private_key="k1", public_key="PUB-OK",
+                          assigned_ip="10.8.0.2", is_synced_to_node=False),
+            WireGuardPeer(subscription_id=exp_sub.id, node_id=node.id, private_key="k2", public_key="PUB-EXP",
+                          assigned_ip="10.8.0.3", is_synced_to_node=True),
+        ])
+        await s.commit()
+        return node
+
+
+@pytest.mark.asyncio
+async def test_amnezia_peers_follow_eligibility(db_engine):
+    from backend.app.models import WireGuardPeer
+    factory = create_session_factory(db_engine)
+    await _seed_awg(factory)
+    orch = _RecordingOrchestrator()
+    sync = nus.NodeUserSync(factory, orch)
+    await sync.sync_once()
+
+    actions = {(p["payload"]["action"], p["payload"]["public_key"]) for _, p in orch.sent}
+    assert actions == {("add_peer", "PUB-OK"), ("remove_peer", "PUB-EXP")}
+    async with factory() as s:
+        peers = {p.public_key: p.is_synced_to_node for p in (await s.execute(select(WireGuardPeer))).scalars()}
+    # The expired user's row (and key) is kept — renewing re-adds the same peer.
+    assert peers == {"PUB-OK": True, "PUB-EXP": False}
+
+    # Steady state: nothing more to send.
+    orch.sent.clear()
+    await sync.sync_once()
+    assert orch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_renewed_user_gets_the_same_amnezia_peer_back(db_engine):
+    from sqlalchemy import update
+    factory = create_session_factory(db_engine)
+    await _seed_awg(factory)
+    orch = _RecordingOrchestrator()
+    sync = nus.NodeUserSync(factory, orch)
+    await sync.sync_once()
+    async with factory() as s:
+        await s.execute(update(User).where(User.username == "awg-expired")
+                        .values(expire_date=datetime.now(timezone.utc) + timedelta(days=30)))
+        await s.commit()
+    orch.sent.clear()
+    await sync.sync_once()
+    assert [(p["payload"]["action"], p["payload"]["public_key"]) for _, p in orch.sent] == [("add_peer", "PUB-EXP")]
+
+
+@pytest.mark.asyncio
+async def test_failed_amnezia_command_is_retried(db_engine):
+    factory = create_session_factory(db_engine)
+    await _seed_awg(factory)
+    orch = _RecordingOrchestrator(accept=False)
+    sync = nus.NodeUserSync(factory, orch)
+    await sync.sync_once()
+    orch.accept = True
+    orch.sent.clear()
+    await sync.sync_once()
+    assert len(orch.sent) == 2

@@ -10,8 +10,15 @@ called from its own tests. A link worked only if someone had hand-edited the
 node, and nothing on a node ever stopped working when a user expired, ran
 out of quota or was deleted.
 
-How it works: for each active VLESS-Reality node that has its Reality
-private key on file, render the complete server config with one client per
+AmneziaWG nodes are reconciled surgically instead (their config is not
+rendered here): a peer whose subscription stopped being eligible is
+removed from the node with `remove_peer` but kept in the database, and is
+re-added with `add_peer` — same key, so the user's installed config works
+again — once the subscription is eligible again. Without this, expired and
+over-quota users kept their AmneziaWG tunnels indefinitely.
+
+How it works for Xray: for each active VLESS-Reality node that has its
+Reality private key on file, render the complete server config with one client per
 *eligible* subscription (active subscription, active user, not expired, not
 over quota) and push it as a full `sync` — but only when it differs from the
 last config that node accepted. A loop does this every
@@ -35,7 +42,7 @@ from sqlalchemy import and_, or_, select
 
 from backend.app.core.proxy_manager import ProxyManager
 from backend.app.core.security import derive_proxy_uuid
-from backend.app.models import Node, NodeProtocol, Subscription, User
+from backend.app.models import Node, NodeProtocol, Subscription, User, WireGuardPeer
 
 logger = logging.getLogger("mtgroup.node_user_sync")
 
@@ -46,9 +53,14 @@ DEBOUNCE_SECONDS = 3.0
 
 async def eligible_subscription_tokens(session) -> list[str]:
     """Tokens of every subscription whose holder may connect right now."""
+    return [token for _, token in await eligible_subscriptions(session)]
+
+
+async def eligible_subscriptions(session) -> list[tuple[int, str]]:
+    """(id, token) of every subscription whose holder may connect right now."""
     now = datetime.now(timezone.utc)
     stmt = (
-        select(Subscription.token)
+        select(Subscription.id, Subscription.token)
         .join(User, User.id == Subscription.user_id)
         .where(
             Subscription.is_active.is_(True),
@@ -63,7 +75,7 @@ async def eligible_subscription_tokens(session) -> list[str]:
         )
         .order_by(Subscription.id)
     )
-    return [row[0] for row in (await session.execute(stmt)).all()]
+    return [(row[0], row[1]) for row in (await session.execute(stmt)).all()]
 
 
 def build_node_config(node: Node, tokens: list[str]) -> dict[str, Any]:
@@ -112,7 +124,8 @@ class NodeUserSync:
             nodes = list((await session.execute(
                 select(Node).where(Node.is_active.is_(True), Node.protocol == NodeProtocol.VLESS_REALITY)
             )).scalars().all())
-            tokens = await eligible_subscription_tokens(session)
+            eligible = await eligible_subscriptions(session)
+        tokens = [token for _, token in eligible]
 
         results: dict[int, bool] = {}
         for node in nodes:
@@ -133,7 +146,43 @@ class NodeUserSync:
             if ok:
                 self._pushed[node.id] = digest
                 logger.info("Provisioned %d user(s) on node %s (%s)", len(tokens), node.id, node.name)
+
+        await self._sync_amnezia({sub_id for sub_id, _ in eligible})
         return results
+
+    async def _sync_amnezia(self, eligible_ids: set[int]) -> tuple[int, int]:
+        """Add/remove AmneziaWG peers so each node carries exactly the
+        eligible subscriptions' peers. Returns (added, removed)."""
+        added = removed = 0
+        async with self._db_session_factory() as session:
+            rows = (await session.execute(
+                select(WireGuardPeer, Node)
+                .join(Node, Node.id == WireGuardPeer.node_id)
+                .where(Node.is_active.is_(True), Node.protocol == NodeProtocol.AMNEZIA_WG)
+            )).all()
+            for peer, node in rows:
+                should_exist = peer.subscription_id in eligible_ids
+                if should_exist == peer.is_synced_to_node:
+                    continue
+                if should_exist:
+                    payload = {"action": "add_peer", "public_key": peer.public_key,
+                               "allowed_ips": f"{peer.assigned_ip}/32"}
+                else:
+                    payload = {"action": "remove_peer", "public_key": peer.public_key}
+                ok = await self._orchestrator.send_command(
+                    node, {"config_type": NodeProtocol.AMNEZIA_WG.value, "payload": payload},
+                )
+                if not ok:
+                    continue  # retried next cycle
+                peer.is_synced_to_node = should_exist
+                if should_exist:
+                    added += 1
+                else:
+                    removed += 1
+            await session.commit()
+        if added or removed:
+            logger.info("AmneziaWG reconcile: %d peer(s) added, %d removed", added, removed)
+        return added, removed
 
     async def _loop(self) -> None:
         while self._is_running:
