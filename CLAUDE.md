@@ -121,6 +121,12 @@ Details worth knowing:
 - **`render_as_batch=True`** is on because SQLite can't `ALTER` most column properties in place.
 - Six columns had both a column-level `unique=True` *and* a named `UniqueConstraint` in `__table_args__`, which emitted duplicate DDL and made `alembic check` permanently dirty. The redundant `unique=True` was removed; the named constraints still enforce uniqueness (there's a test).
 
+### Data integrity / auth conventions
+- **SQLite runs with `PRAGMA foreign_keys` OFF, deliberately.** Alembic's SQLite batch mode rebuilds tables (create-copy-drop); with FKs on, dropping the old table fires `ON DELETE CASCADE` into child tables, i.e. a migration could delete live rows. Consequence: every `ondelete=` in `models.py` is documentation only. Anything that must disappear with its parent needs an ORM `cascade=` or an explicit delete in the endpoint (see `delete_user` → Agent/AbuseReputation, `delete_node` → WireGuardPeer). SQLite also reuses the highest rowid, so an orphan row gets silently "inherited" by the next row created with that id.
+- **Agent hierarchy:** `Agent.sub_agents` is one-to-many, `Agent.parent_agent` many-to-one. They were mapped inverted with `cascade="all"`, so deleting a sub-agent deleted its parent chain.
+- **JWT revocation:** every token carries `tv` = `User.token_version`; `auth.user_from_payload` rejects a mismatch. Bump it on password/role change and deactivation (users API does) and via `POST /api/auth/logout-all`.
+- **IP bans** are enforced in memory (app-level set or XDP map) and persisted in `banned_ips`; `orchestrator.restore_bans()` re-applies unexpired ones at startup and `record_ban()` upserts (the hash is `hash_for_lookup`, same as the admin API).
+
 ### Deployment notes
 - **One process only.** App-level bans, the rate limiter and every background loop (orchestrator retry/health poll, node user sync, …) live in memory, so `serve.py` always runs a single uvicorn worker regardless of `WORKERS`.
 - **Docker:** `.dockerignore` keeps `.env`, `.git`, the DB and logs out of the image; secrets arrive through `env_file`. Runtime state is the `./data` volume (`DATABASE_URL`/`LOG_FILE`/`AUDIT_LOG_FILE` point into it). The backend runs as `0:10001` so the privileged helper's `SO_PEERCRED` check (group `mtgroup`, gid 10001, created in the Dockerfile) accepts it. The frontend port is bound to `127.0.0.1` — the dashboard has no login of its own.

@@ -116,29 +116,26 @@ class TestPreAlembicDatabaseAdoption:
         url = _url(tmp_path, "outdated.db")
         db_path = tmp_path / "outdated.db"
 
-        # Build a current-schema database, then remove a table added by a
-        # later migration and strip the version marker, so it looks like an
-        # older unversioned install.
-        seed = create_async_engine(url)
-        try:
-            async with seed.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-        finally:
-            await seed.dispose()
+        # Build exactly the schema the first release created (the initial
+        # revision), then strip the version marker so it looks like an
+        # unversioned pre-Alembic install. This used to start from the
+        # *current* models and drop later additions by hand, which had to be
+        # edited for every new migration and broke whenever it wasn't.
+        import asyncio
+
+        from alembic import command
+        from alembic.script import ScriptDirectory
+
+        from backend.app.models import _alembic_config
+
+        cfg = _alembic_config(url)
+        base = ScriptDirectory.from_config(cfg).get_base()
+        # env.py drives migrations with asyncio.run(); give it a thread
+        # without a running loop.
+        await asyncio.to_thread(command.upgrade, cfg, base)
 
         conn = sqlite3.connect(db_path)
         try:
-            # Undo *everything* the latest migration introduced, not just the
-            # table — a real pre-migration database would have none of it,
-            # and leaving the columns behind would construct a half-migrated
-            # state that no revision corresponds to.
-            conn.execute("DROP TABLE IF EXISTS wireguard_peers")
-            conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_subnet")
-            conn.execute("ALTER TABLE nodes DROP COLUMN amnezia_server_public_key")
-            # ...and everything every later migration added on top
-            # (c0d043a03fcd: node agent endpoint + pinned certificate).
-            conn.execute("ALTER TABLE nodes DROP COLUMN agent_port")
-            conn.execute("ALTER TABLE nodes DROP COLUMN agent_cert_pem")
             conn.execute("DROP TABLE IF EXISTS alembic_version")
             conn.commit()
         finally:
@@ -148,11 +145,18 @@ class TestPreAlembicDatabaseAdoption:
         try:
             await init_db(engine)
             async with engine.connect() as connection:
-                tables = await connection.run_sync(lambda c: set(sa_inspect(c).get_table_names()))
+                columns = await connection.run_sync(lambda c: {
+                    t: {col["name"] for col in sa_inspect(c).get_columns(t)}
+                    for t in sa_inspect(c).get_table_names()
+                })
         finally:
             await engine.dispose()
 
-        assert "wireguard_peers" in tables, "adoption failed to apply the pending migration"
+        assert "wireguard_peers" in columns, "adoption failed to apply the pending migration"
+        # Every table and column the models define must now exist.
+        for table in Base.metadata.sorted_tables:
+            missing = {c.name for c in table.columns} - columns.get(table.name, set())
+            assert not missing, f"{table.name} is missing {sorted(missing)} after adoption"
 
     @pytest.mark.asyncio
     async def test_booting_twice_is_a_noop(self, tmp_path):

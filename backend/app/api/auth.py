@@ -46,6 +46,36 @@ async def get_db() -> AsyncSession:
     raise NotImplementedError("DB session not configured")
 
 
+def token_claims(user: User) -> dict:
+    """Claims for a freshly issued access/refresh token pair."""
+    return {
+        "sub": str(user.id),
+        "username": user.username,
+        "role": user.role.value,
+        "tv": user.token_version,
+    }
+
+
+def token_is_current(payload: dict, user: User) -> bool:
+    """False for tokens issued before the user's token_version was bumped
+    (password, role or active-state change, or "log out everywhere")."""
+    return payload.get("tv", 0) == (user.token_version or 0)
+
+
+async def user_from_payload(payload: dict | None, db: AsyncSession) -> User | None:
+    """The active user a verified token belongs to, or None."""
+    if not payload:
+        return None
+    try:
+        user_id = int(payload.get("sub"))
+    except (TypeError, ValueError):
+        return None
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None or not user.is_active or not token_is_current(payload, user):
+        return None
+    return user
+
+
 # ---------------------------------------------------------------------------
 # Dependency: Get Current User from JWT
 # ---------------------------------------------------------------------------
@@ -73,20 +103,12 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id = payload.get("sub")
-    if user_id is None:
+    user = await user_from_payload(payload, db)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-        )
-
-    result = await db.execute(select(User).where(User.id == int(user_id)))
-    user = result.scalar_one_or_none()
-
-    if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
+            detail="User not found, inactive, or session revoked",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     return user
@@ -194,7 +216,7 @@ async def login(
     )
 
     # Generate tokens
-    token_data = {"sub": str(user.id), "username": user.username, "role": user.role.value}
+    token_data = token_claims(user)
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
@@ -227,17 +249,14 @@ async def refresh_token(
             detail="Invalid or expired refresh token",
         )
 
-    user_id = payload.get("sub")
-    result = await db.execute(select(User).where(User.id == int(user_id)))
-    user = result.scalar_one_or_none()
-
-    if user is None or not user.is_active:
+    user = await user_from_payload(payload, db)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
+            detail="User not found, inactive, or session revoked",
         )
 
-    token_data = {"sub": str(user.id), "username": user.username, "role": user.role.value}
+    token_data = token_claims(user)
     new_access = create_access_token(token_data)
     new_refresh = create_refresh_token(token_data)
 
@@ -246,6 +265,19 @@ async def refresh_token(
         refresh_token=new_refresh,
         expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
+
+
+@router.post("/logout-all", response_model=MessageResponse)
+async def logout_everywhere(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    """Revoke every access and refresh token issued to the caller so far
+    (e.g. after a token may have leaked)."""
+    current_user.token_version = (current_user.token_version or 0) + 1
+    await db.commit()
+    audit_logger.log_admin_action(admin_username=current_user.username, action="logout_all", target=current_user.username)
+    return MessageResponse(message="All sessions revoked")
 
 
 @router.get("/me", response_model=MessageResponse)

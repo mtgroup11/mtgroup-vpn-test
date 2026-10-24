@@ -118,3 +118,29 @@ class TestBanManagement:
             "/api/system/bans/198.51.100.1", headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_bandwidth_is_a_rate_not_a_cumulative_total(client, monkeypatch):
+    from types import SimpleNamespace
+
+    import backend.app.api.system as system_mod
+    from backend.tests.conftest import get_admin_token
+
+    counters = iter([(0, 0), (1_250_000, 2_500_000)])  # +10 Mbit up, +20 Mbit down
+    clock = iter([100.0, 101.0])
+
+    def fake_counters():
+        sent, recv = next(counters)
+        return SimpleNamespace(bytes_sent=10**12 + sent, bytes_recv=10**12 + recv)
+
+    import psutil
+    monkeypatch.setattr(psutil, "net_io_counters", fake_counters)
+    monkeypatch.setattr(system_mod, "_clock", lambda: next(clock))
+    system_mod._last_net_sample.clear()
+    auth = {"Authorization": f"Bearer {await get_admin_token(client)}"}
+    first = (await client.get("/api/system/stats", headers=auth)).json()
+    second = (await client.get("/api/system/stats", headers=auth)).json()
+    assert first["bandwidth_up_mbps"] == 0  # no previous sample yet
+    assert second["bandwidth_up_mbps"] == pytest.approx(10.0)
+    assert second["bandwidth_down_mbps"] == pytest.approx(20.0)

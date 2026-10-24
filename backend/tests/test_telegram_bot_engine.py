@@ -212,3 +212,38 @@ class TestCmdStatus:
         text = update.message.reply_text.call_args.args[0]
         assert "alice" in text
         assert "5.00 GB" in text
+
+
+class TestEnvFallbackAndEscaping:
+    @pytest.mark.asyncio
+    async def test_env_settings_used_when_no_db_profile(self, monkeypatch):
+        from backend.app.core.config import settings
+        monkeypatch.setattr(settings, "TELEGRAM_ENABLED", True)
+        monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "123:env-token")
+        monkeypatch.setattr(settings, "TELEGRAM_ADMIN_ID", 42)
+        factory, _ = _session_factory_with_config(None)
+        bot = SingularityTelegramBot(session_factory=factory)
+        profile = await bot._load_profile()
+        assert profile == {"enabled": True, "bot_token": "123:env-token", "admin_id": 42}
+
+    @pytest.mark.asyncio
+    async def test_username_is_html_escaped_in_status(self):
+        user = SimpleNamespace(username="<b>evil</b>", data_used_bytes=0, data_limit_bytes=0, expire_date=None)
+        db = AsyncMock()
+        db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=user))
+
+        class _Ctx:
+            async def __aenter__(self):
+                return db
+
+            async def __aexit__(self, *exc):
+                return False
+
+        bot = SingularityTelegramBot(session_factory=lambda: _Ctx())
+        update = MagicMock()
+        update.effective_chat.id = 1
+        update.message.reply_text = AsyncMock()
+        await bot._cmd_status(update, context=MagicMock())
+        text = update.message.reply_text.call_args.args[0]
+        assert "&lt;b&gt;evil&lt;/b&gt;" in text
+        assert "<b>evil</b>" not in text

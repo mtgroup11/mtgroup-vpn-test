@@ -13,7 +13,7 @@ import psutil
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.auth import get_db, require_admin
+from backend.app.api.auth import get_db, require_admin, user_from_payload
 from backend.app.core.config import settings
 from backend.app.core.security import verify_access_token
 from backend.app.ebpf.loader import XDPLoader
@@ -125,15 +125,8 @@ async def websocket_live_metrics(
     (signature, expiry, active admin in DB) *before* the socket is
     accepted. Unauthenticated sockets are closed with 1008.
     """
-    payload = verify_access_token(token) if token else None
-    user = None
-    if payload and payload.get("sub"):
-        try:
-            result = await db.execute(select(User).where(User.id == int(payload["sub"])))
-            user = result.scalar_one_or_none()
-        except (TypeError, ValueError):
-            user = None
-    if user is None or not user.is_active or user.role != UserRole.ADMIN:
+    user = await user_from_payload(verify_access_token(token) if token else None, db)
+    if user is None or user.role != UserRole.ADMIN:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 

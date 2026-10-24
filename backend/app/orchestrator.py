@@ -142,6 +142,7 @@ class NodeOrchestrator:
         self._health_poll_task: asyncio.Task | None = None
         self._is_running = False
         self._app_banned_ips: set[str] = set()
+        self._ban_tasks: set[asyncio.Task] = set()
         # Consecutive health-check failures per node.id, reset on success.
         self._health_failures: dict[int, int] = {}
         # Latest per-node traffic snapshot from /api/v1/health, keyed by
@@ -179,6 +180,8 @@ class NodeOrchestrator:
     async def stop(self):
         """Motoru güvenli bir şekilde durdurur."""
         self._is_running = False
+        for task in list(self._ban_tasks):
+            task.cancel()
         for task in (self._worker_task, self._health_poll_task):
             if task:
                 task.cancel()
@@ -495,48 +498,128 @@ class NodeOrchestrator:
         else:
             self._app_banned_ips.discard(ip_address)
 
+    async def record_ban(self, ip_address: str, reason, details: str | None, ttl_seconds: int) -> None:
+        """Enforce a ban now and persist it, extending an existing row.
+
+        `banned_ips.ip_hash` is unique, so the old insert-only path raised
+        IntegrityError the second time an IP was caught — swallowed by the
+        caller's except, *before* the TTL task was scheduled, which left the
+        enforcement in place until the next restart. It also hashed with
+        plain sha256 while the admin API uses hash_for_lookup, so those bans
+        could never be found or lifted through the API.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import select
+
+        from backend.app.core.crypto_quantum import hash_for_lookup
+        from backend.app.models import BannedIP
+
+        await self.apply_ip_ban(ip_address)
+        if self._db_session_factory:
+            expires = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            ip_hash = hash_for_lookup(ip_address)
+            async with self._db_session_factory() as session:
+                row = (await session.execute(
+                    select(BannedIP).where(BannedIP.ip_hash == ip_hash)
+                )).scalar_one_or_none()
+                if row is None:
+                    session.add(BannedIP(ip_address=ip_address, ip_hash=ip_hash, reason=reason,
+                                         details=details, expires_at=expires))
+                else:
+                    row.reason = reason
+                    row.details = details
+                    current = row.expires_at
+                    if current is not None and current.tzinfo is None:
+                        current = current.replace(tzinfo=timezone.utc)
+                    if current is None or current < expires:
+                        row.expires_at = expires
+                await session.commit()
+        self._schedule_ban_expiry(ip_address, ttl_seconds)
+
+    def _schedule_ban_expiry(self, ip_address: str, ttl_seconds: float) -> None:
+        # Keep a reference: a bare create_task() result can be garbage
+        # collected before it runs.
+        task = asyncio.create_task(self._remove_ban_after_ttl(ip_address, ttl_seconds))
+        self._ban_tasks.add(task)
+        task.add_done_callback(self._ban_tasks.discard)
+
     async def handle_security_alert(self, ip_address: str, reason: str):
         """
         AI tarafından tetiklenen geçici (Fast-Track Defense) uyarısını işler.
-        XDP üzerinden IP'yi 300 saniyeliğine banlar.
-        Veritabanında BannedIP tablosuna asenkron olarak kaydeder.
+        IP'yi 300 saniyeliğine banlar ve BannedIP tablosuna kaydeder.
         """
-        logger.warning("SecurityAlert from AI for IP %s: %s", ip_address, reason)
-        try:
-            await self.apply_ip_ban(ip_address)
+        from backend.app.models import BanReason
 
-            # Veritabanına asenkron kaydet
-            if self._db_session_factory:
-                from backend.app.models import BannedIP, BanReason
-                from datetime import datetime, timedelta, timezone
-                import hashlib
-                
-                async with self._db_session_factory() as session:
-                    ip_hash = hashlib.sha256(ip_address.encode()).hexdigest()
-                    expires = datetime.now(timezone.utc) + timedelta(seconds=300)
-                    new_ban = BannedIP(
-                        ip_address=ip_address,
-                        ip_hash=ip_hash,
-                        reason=BanReason.TRAFFIC_ANOMALY,
-                        details=reason,
-                        expires_at=expires
-                    )
-                    session.add(new_ban)
-                    await session.commit()
-                    logger.debug("Logged banned IP %s to database.", ip_address)
-            
-            # Arka planda TTL süresi bitince banı kaldır
-            asyncio.create_task(self._remove_ban_after_ttl(ip_address, 300))
+        logger.warning("SecurityAlert for IP %s: %s", ip_address, reason)
+        try:
+            await self.record_ban(ip_address, BanReason.TRAFFIC_ANOMALY, reason, 300)
         except Exception as e:
             logger.error("Failed to handle security alert for %s: %s", ip_address, e)
-            
-    async def _remove_ban_after_ttl(self, ip_address: str, ttl: int):
+
+    async def _remove_ban_after_ttl(self, ip_address: str, ttl: float):
         await asyncio.sleep(ttl)
         try:
+            if await self._ban_still_active(ip_address):
+                # Extended (or re-banned) since this timer was set; the newer
+                # expiry has its own timer.
+                return
             await self.lift_ip_ban(ip_address)
-            logger.info("Temporary ban lifted for %s after %ds TTL.", ip_address, ttl)
+            logger.info("Temporary ban lifted for %s after %ss TTL.", ip_address, int(ttl))
         except Exception as e:
             logger.error("Failed to lift temporary ban for %s: %s", ip_address, e)
+
+    async def _ban_still_active(self, ip_address: str) -> bool:
+        if not self._db_session_factory:
+            return False
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import select
+
+        from backend.app.core.crypto_quantum import hash_for_lookup
+        from backend.app.models import BannedIP
+
+        async with self._db_session_factory() as session:
+            row = (await session.execute(
+                select(BannedIP).where(BannedIP.ip_hash == hash_for_lookup(ip_address))
+            )).scalar_one_or_none()
+        if row is None:
+            return False
+        if row.expires_at is None:
+            return True
+        expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+        # 1s slack so the timer that was set for exactly this expiry fires.
+        return expires > datetime.now(timezone.utc) + timedelta(seconds=1)
+
+    async def restore_bans(self) -> int:
+        """Re-apply every unexpired ban from the database. Bans are enforced
+        in memory (app-level set or the XDP map), so without this a restart
+        silently released everyone in the admin's ban list."""
+        if not self._db_session_factory:
+            return 0
+        from datetime import datetime, timezone
+
+        from sqlalchemy import select
+
+        from backend.app.models import BannedIP
+
+        now = datetime.now(timezone.utc)
+        restored = 0
+        async with self._db_session_factory() as session:
+            rows = (await session.execute(select(BannedIP))).scalars().all()
+        for row in rows:
+            expires = row.expires_at
+            if expires is not None and expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires is not None and expires <= now:
+                continue
+            await self.apply_ip_ban(row.ip_address)
+            if expires is not None:
+                self._schedule_ban_expiry(row.ip_address, (expires - now).total_seconds())
+            restored += 1
+        if restored:
+            logger.info("Re-applied %d active IP ban(s) from the database.", restored)
+        return restored
 
     def is_app_banned(self, ip_address: str) -> bool:
         """App-level block kontrolü."""

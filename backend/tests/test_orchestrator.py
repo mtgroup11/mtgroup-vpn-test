@@ -339,35 +339,23 @@ class TestIpBanEnforcement:
         xdp_loader.unblacklist_ip.assert_called_once_with("203.0.113.2")
 
     @pytest.mark.asyncio
-    async def test_handle_security_alert_bans_and_persists(self, orch, monkeypatch):
-        from backend.app.core.config import settings
-
-        monkeypatch.setattr(settings, "EBPF_ENABLED", False)
-        session = AsyncMock()
-        session.add = MagicMock()  # real SQLAlchemy Session.add() is sync
-        orch._db_session_factory = _db_factory_with_session(session)
-        monkeypatch.setattr(orch, "_remove_ban_after_ttl", AsyncMock())
-
-        await orch.handle_security_alert("203.0.113.3", "anomalous traffic spike")
-
-        assert orch.is_app_banned("203.0.113.3") is True
-        session.add.assert_called_once()
-        session.commit.assert_awaited_once()
-        banned_row = session.add.call_args.args[0]
-        assert banned_row.ip_address == "203.0.113.3"
-        assert banned_row.details == "anomalous traffic spike"
-
-    @pytest.mark.asyncio
     async def test_handle_security_alert_does_not_raise_on_db_failure(self, orch, monkeypatch):
         from backend.app.core.config import settings
 
         monkeypatch.setattr(settings, "EBPF_ENABLED", False)
-        session = AsyncMock()
-        session.add = MagicMock()
-        session.commit.side_effect = RuntimeError("db down")
-        orch._db_session_factory = _db_factory_with_session(session)
+
+        class _DownCtx:
+            async def __aenter__(self):
+                raise RuntimeError("db down")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        orch._db_session_factory = lambda: _DownCtx()
 
         await orch.handle_security_alert("203.0.113.4", "test")  # must not raise
+        # Enforcement happens before persistence, so a DB outage still bans.
+        assert orch.is_app_banned("203.0.113.4")
 
     @pytest.mark.asyncio
     async def test_remove_ban_after_ttl_lifts_ban(self, orch, monkeypatch):

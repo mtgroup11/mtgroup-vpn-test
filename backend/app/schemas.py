@@ -552,8 +552,19 @@ class BanReason(str, Enum):
 class BannedIPCreate(BaseModel):
     ip_address: str
     reason: BanReason = BanReason.MANUAL
-    details: Optional[str] = None
+    details: Optional[str] = Field(default=None, max_length=1024)
     duration_hours: int = Field(default=24, ge=1, le=8760)
+
+    @field_validator("ip_address")
+    @classmethod
+    def _normalise_ip(cls, value: str) -> str:
+        # Normalised so "1.2.3.4" and " 1.2.3.4" (or two spellings of an
+        # IPv6 address) hash to the same ban row and match the client IP.
+        import ipaddress
+        try:
+            return str(ipaddress.ip_address(value.strip()))
+        except ValueError:
+            raise ValueError("ip_address must be an IPv4 or IPv6 address") from None
 
 
 class BannedIPResponse(BaseModel):

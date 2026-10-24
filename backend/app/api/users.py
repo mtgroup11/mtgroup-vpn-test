@@ -241,6 +241,13 @@ async def update_user(
 
     update_data = body.model_dump(exclude_unset=True)
 
+    # Revoke this user's existing sessions when what they authenticate with,
+    # what they're allowed to do, or whether they're allowed in at all
+    # changes. Tokens used to stay valid until expiry (refresh: 7 days).
+    revoke_sessions = "password" in update_data or (
+        update_data.get("role") is not None and update_data["role"] != user.role.value
+    ) or (update_data.get("is_active") is False and user.is_active)
+
     if "password" in update_data:
         user.hashed_password = hash_password(update_data.pop("password"))
 
@@ -280,6 +287,20 @@ async def update_user(
             else:
                 setattr(user, key, value)
 
+    if revoke_sessions:
+        user.token_version = (user.token_version or 0) + 1
+
+    if update_data.get("is_active") is False:
+        # Deactivation must cut AmneziaWG too: the peer lives in the node's
+        # WireGuard config, so a deactivated user's tunnel kept working.
+        # If they're re-activated, their next config fetch provisions a new
+        # peer (new key) automatically.
+        sub_ids = (
+            await db.execute(select(Subscription.id).where(Subscription.user_id == user.id))
+        ).scalars().all()
+        revoked = await revoke_peers(db, subscription_ids=list(sub_ids))
+        if revoked:
+            logger.info("Deregistered %d WireGuard peer(s) for deactivated user %s", revoked, user.username)
     user.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(user)
@@ -325,6 +346,18 @@ async def delete_user(
     revoked = await revoke_peers(db, subscription_ids=list(sub_ids))
     if revoked:
         logger.info("Deregistered %d WireGuard peer(s) for %s", revoked, username)
+
+    # Rows that reference users.id with ON DELETE CASCADE but have no ORM
+    # cascade. SQLite runs with foreign keys off, so the database never
+    # removed them: a deleted reseller's agent profile (quota, sub-users)
+    # stayed behind for whichever new user next got the same id — SQLite
+    # reuses the highest rowid.
+    from sqlalchemy import delete as sa_delete
+
+    from backend.app.models import AbuseReputation, Agent
+    for agent in (await db.execute(select(Agent).where(Agent.user_id == user.id))).scalars().all():
+        await db.delete(agent)  # its sub-agents survive with parent_agent_id = NULL
+    await db.execute(sa_delete(AbuseReputation).where(AbuseReputation.user_id == user.id))
 
     await db.delete(user)
     await db.commit()

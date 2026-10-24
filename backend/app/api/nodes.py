@@ -182,6 +182,14 @@ async def delete_node(
         raise HTTPException(status_code=404, detail="Node not found")
 
     name = node.name
+    # wireguard_peers.node_id is ON DELETE CASCADE, but SQLite runs with
+    # foreign keys off and there's no ORM cascade from Node, so the peer rows
+    # (and their tunnel IPs and keys) were left behind pointing at a deleted
+    # node id — which SQLite can hand to the next node created.
+    from sqlalchemy import delete as sa_delete
+
+    from backend.app.models import WireGuardPeer
+    await db.execute(sa_delete(WireGuardPeer).where(WireGuardPeer.node_id == node.id))
     await db.delete(node)
     await db.commit()
 

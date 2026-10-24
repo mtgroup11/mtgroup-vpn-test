@@ -171,6 +171,12 @@ class User(Base):
         Enum(UserRole), nullable=False, default=UserRole.USER
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Embedded in every JWT as "tv". Bumped on password/role/active changes
+    # (and "log out everywhere"), which invalidates every token issued
+    # before — they used to stay valid until expiry (refresh: 7 days).
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+    )
 
     # ── Lifetime Quotas & Bandwidth ─────────────────────────────
     data_limit_bytes: Mapped[int] = mapped_column(
@@ -338,11 +344,17 @@ class Agent(Base):
     parent_agent_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("agents.id", ondelete="SET NULL"), nullable=True,
     )
+    # These two were mapped the wrong way round: `sub_agents` had
+    # remote_side=[id], which makes it the many-to-one side (it pointed at the
+    # *parent*), with cascade="all" — so deleting a sub-agent deleted its
+    # parent, and that parent's parent, up the whole chain. Deleting an agent
+    # now leaves its sub-agents in place with parent_agent_id set to NULL
+    # (matching the FK's ON DELETE SET NULL).
     sub_agents: Mapped[list["Agent"]] = relationship(
-        "Agent", back_populates="parent_agent", remote_side=[id], cascade="all"
+        "Agent", back_populates="parent_agent",
     )
     parent_agent: Mapped[Optional["Agent"]] = relationship(
-        "Agent", back_populates="sub_agents", remote_side=[parent_agent_id]
+        "Agent", back_populates="sub_agents", remote_side=[id],
     )
 
     # ── Traffic Quota (purchased from admin) ────────────────────

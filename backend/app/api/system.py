@@ -14,8 +14,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import asyncio
-
 from backend.app.api.auth import get_db, require_admin
 from backend.app.core.logging_config import audit_logger
 from backend.app.models import BannedIP, Node, SystemConfig, User
@@ -34,6 +32,12 @@ logger = logging.getLogger("mtgroup.api.system")
 router = APIRouter(prefix="/api/system", tags=["System"])
 
 _start_time = time.time()
+# (monotonic time, bytes_sent, bytes_recv) from the previous /stats call.
+_last_net_sample: dict[str, tuple[float, int, int]] = {}
+
+
+def _clock() -> float:
+    return time.monotonic()
 
 
 @router.get("/stats", response_model=SystemStatsResponse)
@@ -63,15 +67,21 @@ async def get_system_stats(
         # psutil not available — return zeros
         pass
 
-    # Network bandwidth (simplified — would use /proc/net/dev on Linux)
+    # Network throughput in Mbit/s, averaged since the previous call. These
+    # fields used to carry the *cumulative MB since boot* under a "mbps" name.
     bw_up = 0.0
     bw_down = 0.0
     try:
         import psutil
 
         net = psutil.net_io_counters()
-        bw_up = net.bytes_sent / (1024 * 1024)
-        bw_down = net.bytes_recv / (1024 * 1024)
+        now = _clock()
+        prev = _last_net_sample.get("sample")
+        if prev is not None and now > prev[0]:
+            elapsed = now - prev[0]
+            bw_up = max(0, net.bytes_sent - prev[1]) * 8 / elapsed / 1_000_000
+            bw_down = max(0, net.bytes_recv - prev[2]) * 8 / elapsed / 1_000_000
+        _last_net_sample["sample"] = (now, net.bytes_sent, net.bytes_recv)
     except (ImportError, AttributeError):
         pass
 
@@ -212,11 +222,18 @@ async def ban_ip(
     `orchestrator.apply_ip_ban()`. Previously this endpoint only wrote the
     DB row — the IP was never actually blocked."""
     ip_h = hash_for_lookup(body.ip_address)
-    existing = await db.execute(
+    existing = (await db.execute(
         select(BannedIP).where(BannedIP.ip_hash == ip_h)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="IP already banned")
+    )).scalar_one_or_none()
+    if existing is not None:
+        expires = existing.expires_at
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires is None or expires > datetime.now(timezone.utc):
+            raise HTTPException(status_code=409, detail="IP already banned")
+        # An expired row used to block re-banning the same IP forever.
+        await db.delete(existing)
+        await db.flush()
 
     ban = BannedIP(
         ip_address=body.ip_address,
@@ -230,9 +247,7 @@ async def ban_ip(
     await db.refresh(ban)
 
     await orchestrator.apply_ip_ban(body.ip_address)
-    ttl_seconds = body.duration_hours * 3600
-    if ttl_seconds > 0:
-        asyncio.create_task(orchestrator._remove_ban_after_ttl(body.ip_address, ttl_seconds))
+    orchestrator._schedule_ban_expiry(body.ip_address, body.duration_hours * 3600)
 
     audit_logger.log_ban(body.ip_address, body.reason, body.duration_hours)
 
@@ -246,6 +261,11 @@ async def unban_ip(
     db: AsyncSession = Depends(get_db),
 ) -> MessageResponse:
     """Remove an IP ban."""
+    import ipaddress as _ipaddress
+    try:
+        ip_address = str(_ipaddress.ip_address(ip_address.strip()))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Not a valid IP address") from None
     ip_h = hash_for_lookup(ip_address)
     result = await db.execute(
         select(BannedIP).where(BannedIP.ip_hash == ip_h)

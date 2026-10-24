@@ -227,6 +227,10 @@ async def lifespan(app: FastAPI):
 
     # Inject db_session_factory to orchestrator
     orchestrator._db_session_factory = db_session_factory
+    try:
+        await orchestrator.restore_bans()
+    except Exception:
+        logging.exception("Could not re-apply persisted IP bans")
 
     from backend.app.core import node_user_sync
     if settings.NODE_USER_SYNC_ENABLED:
