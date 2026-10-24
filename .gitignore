@@ -178,3 +178,6 @@ frontend/.next/
 frontend/next-env.d.ts
 frontend/.env
 frontend/.env.local
+
+# TypeScript incremental build info
+*.tsbuildinfo
