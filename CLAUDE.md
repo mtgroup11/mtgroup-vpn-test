@@ -36,15 +36,18 @@ mypy backend/app/ --ignore-missing-imports --no-strict-optional
 bandit -r backend/ telegram_bot/ -ll --skip B101
 safety check --full-report
 
-# Run the backend locally
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8443
+# Run the backend locally (single process, settings.PORT, TLS if TLS_CERT_PATH/TLS_KEY_PATH set)
+python -m backend.app.serve
 
 # Frontend
 cd frontend && npm install && npm run dev
 
-# Full stack via Docker
-cp .env.example .env   # then set TELEGRAM_BOT_TOKEN, ADMIN_ID, STEALTH_TOKEN, DB_ENCRYPTION_KEY, etc.
-docker compose up -d --build
+# Full stack via Docker — install.sh generates .env (all secrets incl. STEALTH_TOKEN)
+sudo bash install.sh
+docker compose up -d --build   # state (DB, logs) lives in ./data; secrets via env_file: .env
+
+# Node agent on each remote VPN node (command with the key: GET /api/nodes/{id}/agent-setup)
+sudo MTGROUP_NODE_API_KEY=... bash agent/install_agent.sh
 
 # Compile the eBPF XDP program (needs clang/llvm/libbpf-dev, Linux only)
 make
@@ -118,8 +121,13 @@ Details worth knowing:
 - **`render_as_batch=True`** is on because SQLite can't `ALTER` most column properties in place.
 - Six columns had both a column-level `unique=True` *and* a named `UniqueConstraint` in `__table_args__`, which emitted duplicate DDL and made `alembic check` permanently dirty. The redundant `unique=True` was removed; the named constraints still enforce uniqueness (there's a test).
 
+### Deployment notes
+- **One process only.** App-level bans, the rate limiter and every background loop (orchestrator retry/health poll, node user sync, …) live in memory, so `serve.py` always runs a single uvicorn worker regardless of `WORKERS`.
+- **Docker:** `.dockerignore` keeps `.env`, `.git`, the DB and logs out of the image; secrets arrive through `env_file`. Runtime state is the `./data` volume (`DATABASE_URL`/`LOG_FILE`/`AUDIT_LOG_FILE` point into it). The backend runs as `0:10001` so the privileged helper's `SO_PEERCRED` check (group `mtgroup`, gid 10001, created in the Dockerfile) accepts it. The frontend port is bound to `127.0.0.1` — the dashboard has no login of its own.
+- **install.sh** never touches the host's system Python any more (Reality keys via `openssl`; schema created by the container's Alembic run). It renders `watchdog.service` with the checkout's real path. AmneziaWG obfuscation params are randomized per server and printed — the panel's node entry must use the same values. Regenerating the AmneziaWG server (which invalidates every issued config) needs `MTGROUP_AWG_REPROVISION=1`; `--force` only regenerates `.env`.
+
 ### Config and required production secrets
-`backend/app/core/config.py`'s `Settings` (pydantic-settings, loads from `.env`) has safe defaults for local dev, but `lifespan()` **hard-fails at startup** when `DEBUG=False` and any of `DB_ENCRYPTION_KEY`, `ADMIN_PASSWORD`, or `STEALTH_TOKEN` are empty or still the shipped default — this is intentional so the app can't accidentally go to production insecure. When writing tests or local scripts, either set `DEBUG=True` or set real values for these three.
+`backend/app/core/config.py`'s `Settings` (pydantic-settings, loads from `.env`) has safe defaults for local dev, but `lifespan()` (`main._enforce_production_secrets`) **hard-fails at startup** when `DEBUG=False` and any of `DB_ENCRYPTION_KEY`, `ADMIN_PASSWORD`, `STEALTH_TOKEN` or `JWT_SECRET_KEY` is empty, too short, a shipped default, or any `CHANGE_ME*` placeholder from `.env.example` (those are long enough to pass the length checks and are public — a test parses `.env.example` itself so the two can't drift). `JWT_SECRET_KEY` must be set explicitly: its random per-process default would log everyone out on restart. When writing tests or local scripts, either set `DEBUG=True` or set real values.
 
 ### Coverage / test conventions
 

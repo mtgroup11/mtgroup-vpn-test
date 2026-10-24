@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"  # nosec B104 - VPN panel must accept external client connections
     PORT: int = 8443
     BASE_URL: str = "https://panel.example.com"
-    WORKERS: int = 4
+    WORKERS: int = 1  # must stay 1 — see backend/app/serve.py
 
     # ── Database ─────────────────────────────────────────────────────────
     DATABASE_URL: str = f"sqlite+aiosqlite:///{Path(__file__).resolve().parent.parent.parent.parent.as_posix()}/mtgroup.db"
@@ -160,6 +160,7 @@ class Settings(BaseSettings):
     # ── Logging ──────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "mtgroup.log"
+    AUDIT_LOG_FILE: str = "audit.log"
     LOG_MAX_BYTES: int = 10_485_760  # 10 MB
     LOG_BACKUP_COUNT: int = 5
 

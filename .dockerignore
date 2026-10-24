@@ -1,0 +1,33 @@
+# Without this file `COPY . .` baked the operator's .env (every secret the
+# panel has), the SQLite database, logs and the whole .git history into the
+# image layers — readable by anyone who can pull or inspect the image.
+# Secrets reach the containers at runtime via `env_file: .env` instead.
+
+.env
+.env.*
+!.env.example
+.git
+.github
+.claude
+
+# Runtime state lives in the ./data volume, never in the image.
+data/
+*.db
+*.db-journal
+*.log
+.mtgroup_kyber_server.key
+
+# Build / tooling noise
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov/
+.venv
+venv/
+
+# The frontend has its own image and build context.
+frontend/
+docker-compose.override.yml

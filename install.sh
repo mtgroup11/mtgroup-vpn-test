@@ -19,6 +19,10 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+# Everything below resolves paths from the checkout itself, wherever it lives.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_DIR"
+
 EBPF_ENABLED="false"
 OS_NAME=$(grep ^ID= /etc/os-release | cut -d= -f2 | tr -d '"')
 
@@ -36,7 +40,10 @@ if [ ! -f /etc/mtgroup/watchdog.secret ]; then
     chmod 600 /etc/mtgroup/watchdog.secret
     echo "Generated new watchdog secret."
 fi
-cp backend/scripts/watchdog.service /etc/systemd/system/mtgroup-watchdog.service
+# The unit file hardcodes /opt/mtgroup; point it at this checkout instead,
+# otherwise the watchdog crash-loops on any install not cloned to exactly
+# that path (and the AmneziaWG step below then runs without its safety net).
+sed "s#/opt/mtgroup#$REPO_DIR#g" backend/scripts/watchdog.service > /etc/systemd/system/mtgroup-watchdog.service
 systemctl daemon-reload
 systemctl enable mtgroup-watchdog.service
 systemctl restart mtgroup-watchdog.service
@@ -146,22 +153,39 @@ fi
 if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
     mkdir -p "$AWG_CONF_DIR"
 
-    if [ -f "$AWG_CONF" ] && [ "$FORCE" -eq 0 ]; then
+    # Re-provisioning regenerates the server key and obfuscation params,
+    # which invalidates every AmneziaWG config already handed to users, so it
+    # needs its own explicit flag. (`--force` is for regenerating .env; it
+    # used to wipe this too.)
+    if [ -f "$AWG_CONF" ] && [ "${MTGROUP_AWG_REPROVISION:-0}" != "1" ]; then
         echo "Existing AmneziaWG config found at $AWG_CONF — leaving it untouched."
         AWG_PRIVATE_KEY=$(grep '^PrivateKey' "$AWG_CONF" | head -1 | cut -d'=' -f2- | tr -d ' ')
         AWG_PUBLIC_KEY=$(echo "$AWG_PRIVATE_KEY" | awg pubkey 2>/dev/null || true)
     else
         if [ -f "$AWG_CONF" ]; then
-            echo "⚠️ --force used. Overwriting existing AmneziaWG config at $AWG_CONF."
+            echo "⚠️ MTGROUP_AWG_REPROVISION=1: replacing $AWG_CONF. Every AmneziaWG config issued so far stops working."
         else
             echo "Provisioning new AmneziaWG interface ($AWG_SUBNET, port $AWG_LISTEN_PORT)..."
         fi
 
-        # Values below (Jc/Jmin/Jmax/S1/S2/H1-H4, and the subnet unless
-        # overridden) match backend/app/models.py's Node column defaults
-        # exactly, so a Node row created via the dashboard with default
-        # Amnezia settings agrees with what's actually running here
-        # without extra config.
+        # Obfuscation parameters are randomized per server. The old fixed
+        # H1-H4 = 1,2,3,4 are WireGuard's own message types, i.e. handshakes
+        # byte-identical to plain WireGuard — what DPI matches on. They are
+        # printed at the end: the panel's node entry must use the same
+        # values. S1 + 56 must not equal S2 (AmneziaWG rejects it).
+        read -r AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_H1 AWG_H2 AWG_H3 AWG_H4 < <(python3 - <<'PYEOF'
+import secrets
+s1 = 15 + secrets.randbelow(136)
+s2 = 15 + secrets.randbelow(136)
+while s1 + 56 == s2:
+    s2 = 15 + secrets.randbelow(136)
+h = set()
+while len(h) < 4:
+    h.add(5 + secrets.randbelow(2**31 - 5))
+jmin = 40 + secrets.randbelow(20)
+print(3 + secrets.randbelow(8), jmin, jmin + 30 + secrets.randbelow(40), s1, s2, *sorted(h))
+PYEOF
+)
         EGRESS_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
         if [ -z "$EGRESS_IF" ]; then
             EGRESS_IF="eth0"
@@ -179,15 +203,15 @@ ListenPort = $AWG_LISTEN_PORT
 MTU = 1280
 PostUp = iptables -A FORWARD -i awg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $EGRESS_IF -j MASQUERADE
 PostDown = iptables -D FORWARD -i awg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $EGRESS_IF -j MASQUERADE
-Jc = 4
-Jmin = 40
-Jmax = 70
-S1 = 0
-S2 = 0
-H1 = 1
-H2 = 2
-H3 = 3
-H4 = 4
+Jc = $AWG_JC
+Jmin = $AWG_JMIN
+Jmax = $AWG_JMAX
+S1 = $AWG_S1
+S2 = $AWG_S2
+H1 = $AWG_H1
+H2 = $AWG_H2
+H3 = $AWG_H3
+H4 = $AWG_H4
 EOF
         chmod 600 "$AWG_CONF"
     fi
@@ -225,7 +249,6 @@ fi
 if [ "$EBPF_ENABLED" == "false" ]; then
     echo "Adapting Docker Swarm config via docker-compose.override.yml (reducing attack surface)..."
     cat << 'EOF' > docker-compose.override.yml
-version: '3.8'
 services:
   vpn-backend:
     network_mode: "bridge"
@@ -250,24 +273,17 @@ ENV_FILE=".env"
 EXISTING_ENV_KEPT="false"
 ADMIN_PASS="(Unchanged)"
 
-# Function to generate REALITY keys
+# Function to generate REALITY keys (x25519, base64url without padding — the
+# format Xray uses). openssl instead of the old python+cryptography snippet,
+# which needed the full requirements.txt installed into the *host* Python.
+b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
 generate_reality_keys() {
-    cat << 'EOF' > reality_gen.py
-import secrets
-from cryptography.hazmat.primitives.asymmetric import x25519
-from cryptography.hazmat.primitives import serialization
-priv = x25519.X25519PrivateKey.generate()
-pub = priv.public_key()
-priv_bytes = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-pub_bytes = pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-import base64
-print(f"PRIV={base64.urlsafe_b64encode(priv_bytes).decode().rstrip('=')}")
-print(f"PUB={base64.urlsafe_b64encode(pub_bytes).decode().rstrip('=')}")
-EOF
-    KEYS=$(python3 reality_gen.py)
-    rm reality_gen.py
-    REALITY_PRIV=$(echo "$KEYS" | grep PRIV= | cut -d= -f2)
-    REALITY_PUB=$(echo "$KEYS" | grep PUB= | cut -d= -f2)
+    local der
+    der=$(mktemp)
+    openssl genpkey -algorithm X25519 -outform DER -out "$der" 2>/dev/null
+    REALITY_PRIV=$(tail -c 32 "$der" | b64url)
+    REALITY_PUB=$(openssl pkey -inform DER -in "$der" -pubout -outform DER 2>/dev/null | tail -c 32 | b64url)
+    rm -f "$der"
 }
 
 if [ -f "$ENV_FILE" ] && [ "$FORCE" -eq 0 ]; then
@@ -334,27 +350,19 @@ fi
 
 chmod 600 $ENV_FILE
 
-echo "[3/4] Installing Python dependencies..."
-pip3 install -r requirements.txt --break-system-packages || pip3 install -r requirements.txt
-
-echo "[4/4] Setting up SQLite Database..."
-cat << 'EOF' > init_db.py
-import asyncio
-import os
-from backend.app.models import Base
-from backend.app.core.config import settings
-from sqlalchemy.ext.asyncio import create_async_engine
-
-async def main():
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-EOF
-python3 init_db.py
-rm init_db.py
+echo "[3/4] Preparing the data directory..."
+# The backend container keeps its DB and logs in ./data (see
+# docker-compose.yml) and creates/migrates the schema itself on start via
+# Alembic. This used to pip-install requirements.txt into the host's system
+# Python (--break-system-packages) just to run create_all() here.
+mkdir -p data
+# Carry state over from installs that bind-mounted files in the repo root.
+for f in mtgroup.db audit.log mtgroup.log; do
+    if [ -f "$f" ] && [ ! -e "data/$f" ]; then
+        mv "$f" "data/$f"
+        echo "Moved existing $f into data/."
+    fi
+done
 
 # Source .env to get variables for summary, including the just-generated REALITY keys
 set -a; source $ENV_FILE; set +a
@@ -383,6 +391,13 @@ else
     echo "🔐 AmneziaWG                   : not provisioned on this host."
 fi
 echo "----------------------------------------------------------"
+if [ -n "${AWG_JC:-}" ] || [ -f "$AWG_CONF" ]; then
+    echo "   Obfuscation (enter the same values on the node in the panel):"
+    grep -E '^(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4) *=' "$AWG_CONF" 2>/dev/null | sed 's/^/     /'
+fi
+echo "----------------------------------------------------------"
+echo "🕶️  Stealth token  : in $ENV_FILE (STEALTH_TOKEN) — API clients must send it as X-Stealth-Token"
+echo "📊 Dashboard      : http://127.0.0.1:3000 on this host (ssh -L 3000:127.0.0.1:3000 <server>)"
 echo "🛡️  eBPF Status    : $EBPF_ENABLED"
 if [ "$EBPF_ENABLED" == "true" ]; then
     echo "   (AI Detector, Port Hopper, and XDP Blacklist ACTIVE)"
@@ -390,4 +405,6 @@ else
     echo "   (Basic mode. AI & Port Hopper bypassed. App-level decoy active.)"
 fi
 echo "=========================================================="
-echo "Run 'docker compose up -d' to start the swarm!"
+echo "Run 'docker compose up -d --build' to start the panel."
+echo "Remote VPN nodes: install the agent there with agent/install_agent.sh"
+echo "(the panel's GET /api/nodes/<id>/agent-setup prints the exact command)."

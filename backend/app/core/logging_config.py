@@ -59,12 +59,15 @@ class SecurityAuditLogger:
     Writes to a separate audit log file.
     """
 
-    def __init__(self, log_file: str = "audit.log"):
+    def __init__(self, log_file: str | None = None):
         self.logger = logging.getLogger("mtgroup.audit")
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
 
-        log_path = Path(log_file)
+        log_path = Path(log_file or settings.AUDIT_LOG_FILE)
+        # The Docker deployment points this into the ./data volume; the
+        # directory may not exist yet on a fresh install.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
             str(log_path),
             maxBytes=settings.LOG_MAX_BYTES,
@@ -207,6 +210,7 @@ def setup_logging() -> logging.Logger:
 
     # File handler (JSON structured)
     log_path = Path(settings.LOG_FILE)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         str(log_path),
         maxBytes=settings.LOG_MAX_BYTES,

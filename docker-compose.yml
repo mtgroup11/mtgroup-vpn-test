@@ -1,10 +1,11 @@
-version: '3.8'
-
 services:
   # ── Privileged Helper ──────────────────────────────────────────────────
   # Root-owned daemon that owns iptables/nft/systemctl. vpn-backend talks to
   # it over a Unix socket (shared volume below) instead of calling these
-  # tools itself — see backend/app/privileged_helper_daemon.py.
+  # tools itself — see backend/app/privileged_helper_daemon.py. It only
+  # answers peers whose uid or primary gid is `mtgroup` (gid 10001, created
+  # in the Dockerfile). Note `systemctl` doesn't exist inside a container,
+  # so service.restart requests fail cleanly here; firewall ops work.
   vpn-privileged-helper:
     build:
       context: .
@@ -32,13 +33,21 @@ services:
     depends_on:
       - vpn-privileged-helper
 
+    # Secrets and settings come from .env at runtime. They used to reach the
+    # container only because `COPY . .` baked .env into the image.
+    env_file: .env
+
+    # uid 0 (BPF load/attach still happens in-process, see main.py), primary
+    # gid = mtgroup so the privileged helper's SO_PEERCRED check accepts it.
+    user: "0:10001"
+
     # ── eBPF / XDP Network Requirements ──
     # The application still compiles and loads XDP bytecode itself (see
     # backend/app/main.py lifespan) — CAP_SYS_ADMIN/CAP_NET_ADMIN here are
     # for that BPF load/attach only. iptables/nft/systemctl calls no longer
     # happen in this container; they go through vpn-privileged-helper.
-    # Moving the eBPF load/attach itself behind the helper (via pinned BPF
-    # maps) is tracked as follow-up work, not done in this pass.
+    # install.sh replaces this with a bridge-networked, cap-dropped variant
+    # (docker-compose.override.yml) when eBPF isn't available.
     network_mode: "host"
 
     volumes:
@@ -46,16 +55,19 @@ services:
       - /lib/modules:/lib/modules:ro
       - /usr/src:/usr/src:ro
 
-      # Persist SQLite DB and logs
-      - ./mtgroup.db:/app/mtgroup.db
-      - ./mtgroup.log:/app/mtgroup.log
-      - ./audit.log:/app/audit.log
+      # All runtime state: SQLite DB, logs. A directory, not per-file bind
+      # mounts — mounting a file path that doesn't exist yet makes Docker
+      # create a *directory* there, and the app then crashes opening its
+      # log "file".
+      - ./data:/app/data
 
       # Shared socket to reach the privileged helper
       - mtgroup-helper-sock:/run/mtgroup
 
     environment:
-      - DATABASE_URL=sqlite+aiosqlite:///./mtgroup.db
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/mtgroup.db
+      - LOG_FILE=/app/data/mtgroup.log
+      - AUDIT_LOG_FILE=/app/data/audit.log
       - PYTHONIOENCODING=utf-8
       - PRIVILEGED_HELPER_SOCKET=/run/mtgroup/helper.sock
 
@@ -70,24 +82,21 @@ services:
       dockerfile: Dockerfile
     container_name: mtgroup-vpn-frontend
     restart: unless-stopped
+    # Loopback only by default: the dashboard has no login of its own, and
+    # a page titled "MTGroup Ultimate NOC" on a public port is exactly the
+    # fingerprint the stealth layer exists to avoid. Reach it through an
+    # SSH tunnel (ssh -L 3000:127.0.0.1:3000 server), or change this
+    # deliberately once it sits behind real authentication.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - NODE_ENV=production
-      # vpn-backend runs with network_mode: host (see its own comment
-      # above), so it isn't reachable via Docker's internal service-name
-      # DNS the way a normal bridge-networked service would be — it's
-      # only reachable via the host's own network. host.docker.internal
-      # + extra_hosts below is the standard way to reach the host from a
-      # bridge-networked container on Linux (Docker Desktop already
-      # provides this DNS name; extra_hosts is what makes it resolve on
-      # native Linux Docker too, since Compose v20.10+).
-      # Dockerfile's CMD actually binds uvicorn to :8000 (EXPOSE 8000),
-      # despite CLAUDE.md's "run locally" example using :8443 — a
-      # pre-existing inconsistency, not something introduced here.
-      # Override BACKEND_INTERNAL_URL if your deployment's backend
-      # actually listens elsewhere.
-      - BACKEND_INTERNAL_URL=http://host.docker.internal:8000
+      # vpn-backend runs with network_mode: host, so it's reached via the
+      # host; host.docker.internal + extra_hosts makes that name resolve on
+      # native Linux Docker too. The panel listens on settings.PORT (8443).
+      # If you enable TLS on the panel (TLS_CERT_PATH), switch this to
+      # https:// with a certificate the frontend container trusts.
+      - BACKEND_INTERNAL_URL=http://host.docker.internal:8443
       - STEALTH_TOKEN=${STEALTH_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"

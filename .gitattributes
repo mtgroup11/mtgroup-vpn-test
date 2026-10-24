@@ -1,0 +1,5 @@
+# Shell scripts run on Linux servers; a CRLF checkout (core.autocrlf on
+# Windows) makes bash fail with "$'\r': command not found".
+*.sh text eol=lf
+*.service text eol=lf
+Dockerfile text eol=lf
