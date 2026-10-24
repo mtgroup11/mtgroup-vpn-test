@@ -26,6 +26,13 @@ from backend.app.models import (
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_mtgroup.db"
 
+# The suite must not depend on whatever .env the developer has: it passed
+# locally only because a local .env set STEALTH_TOKEN (and DEBUG), while CI
+# has no .env — there an empty STEALTH_TOKEN makes the stealth gate reject
+# every request and the API tests all fail. Pin the values tests rely on.
+settings.STEALTH_TOKEN = "pytest-stealth-token-0123456789abcdef"
+settings.DEBUG = True
+
 
 @pytest_asyncio.fixture(scope="function")
 async def db_engine():
