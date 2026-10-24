@@ -23,11 +23,23 @@ async def _create_user_with_sub_token(client, token, username="subgapuser"):
 
 class TestUniversalSubscription:
     @pytest.mark.asyncio
-    async def test_default_user_agent_returns_singbox_json(self, client):
+    async def test_unknown_user_agent_returns_base64_links(self, client):
+        # Share links are the one format every client can import; sing-box
+        # JSON is only for clients known to understand it.
+        import base64
         token = await get_admin_token(client)
         sub_token = await _create_user_with_sub_token(client, token)
 
-        resp = await client.get(f"/sub/{sub_token}")
+        resp = await client.get(f"/sub/{sub_token}", headers={"User-Agent": "Shadowrocket/2.2"})
+        assert resp.status_code == 200
+        assert base64.b64decode(resp.text).decode().startswith("vless://")
+
+    @pytest.mark.asyncio
+    async def test_singbox_user_agent_returns_singbox_json(self, client):
+        token = await get_admin_token(client)
+        sub_token = await _create_user_with_sub_token(client, token, username="sbuadetect")
+
+        resp = await client.get(f"/sub/{sub_token}", headers={"User-Agent": "HiddifyNext/2.5"})
         assert resp.status_code == 200
         assert "outbounds" in resp.json()
 

@@ -1,41 +1,42 @@
 """
 MTGroup VPN Ultimate — Sing-box Configuration Generator
-Complete JSON config with Iran bypass, gamer mode routing,
-split tunneling, battery optimization, and TLS fragmentation.
-This is the primary config format for Streisand and Nekobox.
+Complete client JSON config with Iran bypass, gamer-mode routing and
+split tunneling. This is the default format for unknown clients and the
+primary one for Streisand, NekoBox, Hiddify, SFA/SFI and v2box.
+
+Targets the sing-box 1.12+ configuration format and must stay loadable on
+every stable line in use (1.12, 1.13, 1.14 at the time of writing).
+sing-box decodes configs strictly — one unknown or removed field makes the
+client reject the whole subscription — so this module only emits fields
+that exist in all of those versions. The previous generator relied on
+features removed upstream (legacy `geoip`/`geosite` rules and databases,
+`block`/`dns` special outbounds, inbound `sniff` fields, `inet4_address`,
+legacy DNS server strings) plus an `experimental.tls_fragment` key that
+never existed, and was rejected by 1.12, 1.13 and 1.14 alike.
+
+Iran bypass uses inline `domain_suffix`/`ip_cidr` rules rather than remote
+rule-sets: a rule-set that can't be downloaded (GitHub is routinely
+throttled in Iran) stops the client from starting at all, which is the
+worst possible failure for a censorship-circumvention config.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
-import random
+import logging
+import re
 from typing import Any, Optional
 
+from backend.app.generators._common import normalize_fingerprint as _get_fingerprint
 from backend.app.models import HostSpoofMode, ShapingMode
-from backend.app.generators.traffic_shaper import TrafficShaper
 
-
-def _get_fingerprint(fp: str) -> str:
-    if fp == "randomized":
-        return random.choice(["chrome", "firefox", "safari", "edge", "ios", "android"])
-    return fp
+logger = logging.getLogger("mtgroup.generators.singbox")
 
 
 # ---------------------------------------------------------------------------
 # Iran Bypass Constants
 # ---------------------------------------------------------------------------
-
-IRAN_BYPASS_GEOSITE = [
-    "category-ir",
-    "category-bank-ir",
-    "category-bourse-ir",
-    "category-education-ir",
-    "category-gov-ir",
-    "category-media-ir",
-    "category-payment-ir",
-    "category-tech-ir",
-    "category-shopping-ir",
-]
 
 IRAN_BYPASS_DOMAINS = [
     "domain:.ir",
@@ -343,16 +344,15 @@ def generate_singbox_config(
     split_bypass_ips: Optional[list[str]] = None,
     split_force_domains: Optional[list[str]] = None,
     split_force_ips: Optional[list[str]] = None,
-    # TLS fragmentation
-    tls_fragment_enabled: bool = True,
+    # Accepted for call-site compatibility; sing-box has no portable
+    # (1.12-1.14) TLS-fragment setting, and fragmenting a Reality
+    # ClientHello gains nothing anyway — its SNI is a real third-party site.
+    tls_fragment_enabled: bool = False,
     tls_fragment_size: str = "50-200",
     tls_fragment_sleep: str = "10-50",
     # DNS
     dns_servers: Optional[list[str]] = None,
     dns_strategy: str = "ipv4_only",
-    # Battery
-    idle_timeout: int = 300,
-    connection_check_interval: int = 600,
     # Label
     label: str = "MTGroup VPN",
     # DPI Evasion
@@ -362,36 +362,36 @@ def generate_singbox_config(
     spoofed_host: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Generate a complete Sing-box JSON configuration with full routing,
-    DNS, and experimental features.
-    """
-    if dns_servers is None:
-        dns_servers = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+    Generate a complete sing-box client configuration.
 
-    config: dict[str, Any] = {
-        "log": {
-            "level": "warn",
-            "timestamp": True,
-        },
-        "experimental": {},
+    `dns_servers` entries are DoH URLs (``https://1.1.1.1/dns-query``) or
+    plain IPs; only the first is used, as the remote resolver.
+    """
+    if warp_bypass:
+        # The old WARP outbound shipped a literal "YOUR_WARP_PRIVATE_KEY"
+        # placeholder, which made sing-box reject the whole config for any
+        # user with this flag. There is no per-user WARP registration in
+        # this panel to fill it from, so the flag is a no-op until there is.
+        logger.debug("warp_bypass requested but no WARP credentials are provisioned; ignoring")
+
+    return {
+        "log": {"level": "warn", "timestamp": True},
         "dns": _build_dns_config(
-            dns_servers=dns_servers,
+            dns_server=(dns_servers or ["https://1.1.1.1/dns-query"])[0],
             dns_strategy=dns_strategy,
             iran_bypass=iran_bypass,
         ),
-        "inbounds": _build_inbounds(battery_saver=battery_saver),
+        "inbounds": _build_inbounds(),
         "outbounds": _build_outbounds(
             user_outbounds=outbounds,
             tls_fingerprint=tls_fingerprint,
-            shaping_mode=shaping_mode,
             host_spoof_mode=host_spoof_mode,
             spoofed_host=spoofed_host,
-            warp_bypass=warp_bypass,
+            battery_saver=battery_saver,
         ),
         "route": _build_route(
             iran_bypass=iran_bypass,
             gamer_mode=gamer_mode,
-            warp_bypass=warp_bypass,
             split_bypass_domains=split_bypass_domains or [],
             split_bypass_ips=split_bypass_ips or [],
             split_force_domains=split_force_domains or [],
@@ -399,185 +399,166 @@ def generate_singbox_config(
         ),
     }
 
-    # TLS fragment experimental feature
-    if tls_fragment_enabled:
-        config["experimental"]["tls_fragment"] = {
-            "enabled": True,
-            "size": tls_fragment_size,
-            "sleep": tls_fragment_sleep,
-        }
 
-    # Battery optimization — clash API for stats
-    if battery_saver:
-        config["experimental"]["clash_api"] = {
-            "external_controller": "127.0.0.1:9090",
-            "store_selected": True,
-        }
-
-    return config
+_DNS_URL_RE = re.compile(r"^(https|tls|quic|h3|udp|tcp)://([^/:]+)(?::(\d+))?(/.*)?$")
 
 
-def _build_dns_config(
-    dns_servers: list[str],
-    dns_strategy: str,
-    iran_bypass: bool,
-) -> dict[str, Any]:
-    """Build the DNS configuration with Iran-specific direct resolution."""
-    servers = [
-        {
-            "tag": "dns-remote",
-            "address": dns_servers[0],
-            "address_resolver": "dns-direct",
-            "strategy": dns_strategy,
-            "detour": "proxy",
-        },
-        {
-            "tag": "dns-direct",
-            "address": "local",
-            "strategy": dns_strategy,
-            "detour": "direct",
-        },
-        {
-            "tag": "dns-block",
-            "address": "rcode://success",
-        },
-    ]
+def _dns_server_from(spec: str) -> dict[str, Any]:
+    """Turn ``https://host/path`` / ``tls://host`` / ``1.2.3.4`` into a
+    1.12-format typed DNS server definition."""
+    match = _DNS_URL_RE.match(spec.strip())
+    if not match:
+        return {"type": "udp", "server": spec.strip()}
+    scheme, host, port, path = match.groups()
+    server: dict[str, Any] = {"type": scheme, "server": host}
+    if port:
+        server["server_port"] = int(port)
+    if path and scheme in ("https", "h3") and path != "/dns-query":
+        server["path"] = path
+    return server
 
-    rules: list[dict[str, Any]] = [
-        {
-            "outbound": ["any"],
-            "server": "dns-direct",
-        },
-    ]
 
+def _build_dns_config(dns_server: str, dns_strategy: str, iran_bypass: bool) -> dict[str, Any]:
+    """Remote DNS through the tunnel; Iranian names resolved locally so
+    domestic services get domestic (CDN-local, unblocked) answers."""
+    remote = _dns_server_from(dns_server)
+    remote.update({"tag": "dns-remote", "detour": "proxy"})
+    servers = [remote, {"type": "local", "tag": "dns-local"}]
+
+    rules: list[dict[str, Any]] = []
     if iran_bypass:
-        # Route .ir domains to direct DNS
-        rules.append({
-            "domain_suffix": [".ir"],
-            "server": "dns-direct",
-        })
-        rules.append({
-            "geosite": IRAN_BYPASS_GEOSITE,
-            "server": "dns-direct",
-        })
-
-    # Block ads
-    rules.append({
-        "geosite": ["category-ads-all"],
-        "server": "dns-block",
-        "disable_cache": True,
-    })
+        rules.append(_domain_rule(IRAN_BYPASS_DOMAINS, server="dns-local"))
 
     return {
         "servers": servers,
         "rules": rules,
+        "final": "dns-remote",
         "strategy": dns_strategy,
-        "independent_cache": True,
     }
 
 
-def _build_inbounds(battery_saver: bool) -> list[dict[str, Any]]:
-    """Build inbound configurations with battery optimization."""
-    tun_config: dict[str, Any] = {
+def _build_inbounds() -> list[dict[str, Any]]:
+    return [{
         "type": "tun",
         "tag": "tun-in",
-        "inet4_address": "172.19.0.1/30",
-        "inet6_address": "fdfe:dcba:9876::1/126",
+        "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
         "auto_route": True,
         "strict_route": True,
-        "sniff": not battery_saver,  # Disable sniffing in battery saver mode
-        "sniff_override_destination": not battery_saver,
-    }
+    }]
 
-    if battery_saver:
-        # Reduce polling for battery savings
-        tun_config["endpoint_independent_nat"] = True
 
-    return [tun_config]
+_UTLS_CAPABLE = {"vless", "vmess", "trojan", "shadowtls", "anytls"}
 
 
 def _build_outbounds(
     user_outbounds: list[dict[str, Any]],
     tls_fingerprint: str,
-    shaping_mode: ShapingMode,
     host_spoof_mode: HostSpoofMode,
     spoofed_host: Optional[str],
-    warp_bypass: bool = False,
+    battery_saver: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build outbound configurations with DPI evasion injection."""
-    outbounds = []
-    
-    # Initialize TrafficShaper for the padding profile
-    shaper = TrafficShaper(mode=shaping_mode)
-    mux_config = shaper.generate_singbox_multiplex_config()
-    
-    # Inject DPI evasion features into each user outbound
+    """Selector + url-test over the user's servers, then the servers, then
+    `direct`. No `multiplex`: it used to be injected into every outbound,
+    which sing-box rejects outright on hysteria2/tuic (no such field), and
+    VLESS-Vision doesn't support it either."""
     for ob in user_outbounds:
-        # TLS uTLS injection
-        if "tls" in ob:
-            ob["tls"]["utls"] = {
-                "enabled": True,
-                "fingerprint": _get_fingerprint(tls_fingerprint)
-            }
-        
-        # Traffic Shaping padding injection
-        ob["multiplex"] = mux_config
-        
-        # Host Spoofing injection
-        if host_spoof_mode != HostSpoofMode.NONE and spoofed_host:
-            transport = ob.get("transport", {})
-            if transport.get("type") in ("ws", "httpupgrade"):
-                if "headers" not in transport:
-                    transport["headers"] = {}
-                transport["headers"]["Host"] = spoofed_host
-                
-                if host_spoof_mode == HostSpoofMode.BUG_INJECTION:
-                    path = transport.get("path", "/")
-                    transport["path"] = f"http://{spoofed_host}{path}"
-            ob["transport"] = transport
+        tls = ob.get("tls")
+        # uTLS only exists for TCP+TLS protocols — QUIC-based hysteria2/tuic
+        # have no uTLS. Don't override a fingerprint the caller already set.
+        if isinstance(tls, dict) and ob.get("type") in _UTLS_CAPABLE and "utls" not in tls:
+            tls["utls"] = {"enabled": True, "fingerprint": _get_fingerprint(tls_fingerprint)}
 
-    # Add selector (auto-select best)
-    proxy_tags = [ob.get("tag", f"proxy-{i}") for i, ob in enumerate(user_outbounds)]
+        transport = ob.get("transport")
+        if (host_spoof_mode != HostSpoofMode.NONE and spoofed_host
+                and isinstance(transport, dict) and transport.get("type") in ("ws", "httpupgrade")):
+            if transport["type"] == "ws":
+                transport.setdefault("headers", {})["Host"] = spoofed_host
+            else:
+                transport["host"] = spoofed_host
+            if host_spoof_mode == HostSpoofMode.BUG_INJECTION:
+                transport["path"] = f"http://{spoofed_host}{transport.get('path', '/')}"
 
-    outbounds.append({
-        "type": "selector",
-        "tag": "proxy",
-        "outbounds": ["auto"] + proxy_tags,
-        "default": "auto",
-    })
+    proxy_tags = []
+    for i, ob in enumerate(user_outbounds):
+        ob.setdefault("tag", f"proxy-{i}")
+        proxy_tags.append(ob["tag"])
 
-    outbounds.append({
-        "type": "urltest",
-        "tag": "auto",
-        "outbounds": proxy_tags,
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": "5m",
-        "tolerance": 50,
-    })
-
-    # Add user-defined outbounds
-    outbounds.extend(user_outbounds)
-
-    # System outbounds
-    outbounds.append({"type": "direct", "tag": "direct"})
-    outbounds.append({"type": "block", "tag": "block"})
-    outbounds.append({"type": "dns", "tag": "dns-out"})
-    
-    if warp_bypass:
+    outbounds: list[dict[str, Any]] = []
+    if proxy_tags:
         outbounds.append({
-            "type": "wireguard",
-            "tag": "warp",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
-            "system_interface": True,
-            "local_address": ["172.16.0.2/32", "2606:4700:110:8f62:eec7:7b06:a689:c339/128"],
-            "private_key": "YOUR_WARP_PRIVATE_KEY", # Placeholder, would be fetched from DB
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": [0, 0, 0],
-            "mtu": 1280
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": ["auto"] + proxy_tags,
+            "default": "auto",
         })
+        outbounds.append({
+            "type": "urltest",
+            "tag": "auto",
+            "outbounds": proxy_tags,
+            "url": "https://www.gstatic.com/generate_204",
+            # Probing every server every few minutes keeps radios awake.
+            "interval": "30m" if battery_saver else "5m",
+            "tolerance": 50,
+        })
+    else:
+        # urltest/selector with no members is a hard error. Callers should
+        # refuse to render a config without servers; this just keeps the
+        # output loadable if one slips through.
+        outbounds.append({"type": "selector", "tag": "proxy", "outbounds": ["direct"]})
 
+    outbounds.extend(user_outbounds)
+    outbounds.append({"type": "direct", "tag": "direct"})
     return outbounds
+
+
+_DOMAIN_RE = re.compile(r"^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}$")
+
+
+def _clean_domains(values: list[str]) -> list[str]:
+    """User-supplied split-tunnel domains -> valid suffixes; junk dropped."""
+    out = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        domain = value.strip().lower()
+        if domain.startswith("domain:"):
+            domain = domain[len("domain:"):]
+        domain = domain.lstrip(".")
+        if _DOMAIN_RE.match(domain):
+            out.append(domain)
+    return out
+
+
+def _clean_cidrs(values: list[str]) -> list[str]:
+    out = []
+    for value in values:
+        try:
+            out.append(str(ipaddress.ip_network(str(value).strip(), strict=False)))
+        except ValueError:
+            continue
+    return out
+
+
+def _domain_rule(specs: list[str], **target: str) -> dict[str, Any]:
+    """Xray-style `domain:`/`full:` specs -> one sing-box rule.
+
+    The constants are written in Xray syntax and used to be passed to
+    sing-box verbatim, where `"domain:battle.net"` is just a literal string
+    that never matches anything.
+    """
+    suffixes, exact = [], []
+    for spec in specs:
+        if spec.startswith("full:"):
+            exact.append(spec[len("full:"):])
+        else:
+            suffixes.append(spec.split(":", 1)[-1].lstrip("."))
+    rule: dict[str, Any] = {}
+    if exact:
+        rule["domain"] = exact
+    if suffixes:
+        rule["domain_suffix"] = suffixes
+    rule.update(target)
+    return rule
 
 
 def _build_route(
@@ -587,112 +568,48 @@ def _build_route(
     split_bypass_ips: list[str],
     split_force_domains: list[str],
     split_force_ips: list[str],
-    warp_bypass: bool = False,
 ) -> dict[str, Any]:
-    """Build routing rules with Iran bypass, gamer mode, and split tunneling."""
-    rules: list[dict[str, Any]] = []
+    """Routing rules. First match wins, so the user's explicit "force
+    through proxy" entries come before every bypass."""
+    rules: list[dict[str, Any]] = [
+        # Domain-based rules can't match in TUN mode without sniffing.
+        {"action": "sniff"},
+        {"protocol": "dns", "action": "hijack-dns"},
+        {"ip_is_private": True, "outbound": "direct"},
+    ]
 
-    # DNS hijack
-    rules.append({
-        "protocol": "dns",
-        "outbound": "dns-out",
-    })
+    force_domains = _clean_domains(split_force_domains)
+    force_ips = _clean_cidrs(split_force_ips)
+    if force_domains:
+        rules.append({"domain_suffix": force_domains, "outbound": "proxy"})
+    if force_ips:
+        rules.append({"ip_cidr": force_ips, "outbound": "proxy"})
 
-    # Block ads
-    rules.append({
-        "geosite": ["category-ads-all"],
-        "outbound": "block",
-    })
+    bypass_domains = _clean_domains(split_bypass_domains)
+    bypass_ips = _clean_cidrs(split_bypass_ips)
+    if bypass_domains:
+        # domain_suffix, not domain_keyword: a keyword "ir" matched every
+        # domain containing those two letters.
+        rules.append({"domain_suffix": bypass_domains, "outbound": "direct"})
+    if bypass_ips:
+        rules.append({"ip_cidr": bypass_ips, "outbound": "direct"})
 
-    # WARP Bypass (Netflix / Google Captcha)
-    if warp_bypass:
-        rules.append({
-            "geosite": ["google", "netflix", "openai", "category-ai"],
-            "outbound": "warp"
-        })
-        rules.append({
-            "domain_keyword": ["chatgpt", "openai", "google", "netflix"],
-            "outbound": "warp"
-        })
-
-    # Iran bypass rules
     if iran_bypass:
-        rules.append({
-            "domain_suffix": [".ir"],
-            "outbound": "direct",
-        })
-        rules.append({
-            "geosite": IRAN_BYPASS_GEOSITE,
-            "outbound": "direct",
-        })
-        rules.append({
-            "geoip": ["ir", "private"],
-            "outbound": "direct",
-        })
-        rules.append({
-            "ip_cidr": IRAN_BYPASS_IP_CIDR[:50],  # First batch
-            "outbound": "direct",
-        })
+        rules.append(_domain_rule(IRAN_BYPASS_DOMAINS, outbound="direct"))
+        # The whole list — it used to be silently cut to the first 50 of 232.
+        rules.append({"ip_cidr": list(IRAN_BYPASS_IP_CIDR), "outbound": "direct"})
 
-    # Gamer mode — direct routing for game servers (lower latency)
     if gamer_mode:
-        rules.append({
-            "domain": GAMER_DIRECT_DOMAINS,
-            "outbound": "direct",
-        })
-        rules.append({
-            "ip_cidr": GAMER_DIRECT_IP_CIDR,
-            "outbound": "direct",
-        })
-
-    # Custom split tunnel — bypass
-    if split_bypass_domains:
-        rules.append({
-            "domain_keyword": split_bypass_domains,
-            "outbound": "direct",
-        })
-    if split_bypass_ips:
-        rules.append({
-            "ip_cidr": split_bypass_ips,
-            "outbound": "direct",
-        })
-
-    # Custom split tunnel — force through proxy
-    if split_force_domains:
-        rules.append({
-            "domain_keyword": split_force_domains,
-            "outbound": "proxy",
-        })
-    if split_force_ips:
-        rules.append({
-            "ip_cidr": split_force_ips,
-            "outbound": "proxy",
-        })
-
-    # Private IPs direct
-    rules.append({
-        "geoip": ["private"],
-        "outbound": "direct",
-    })
-
-    # Default: everything through proxy
-    rules.append({
-        "port": [80, 443],
-        "outbound": "proxy",
-    })
+        rules.append(_domain_rule(GAMER_DIRECT_DOMAINS, outbound="direct"))
+        rules.append({"ip_cidr": list(GAMER_DIRECT_IP_CIDR), "outbound": "direct"})
 
     return {
         "rules": rules,
-        "auto_detect_interface": True,
         "final": "proxy",
-        "geoip": {
-            "download_url": "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db",
-            "download_detour": "direct",
-        },
-        "geosite": {
-            "download_url": "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db",
-            "download_detour": "direct",
-        },
+        "auto_detect_interface": True,
+        # Resolves the proxy servers' own hostnames (when a node address is
+        # a domain) without going through the tunnel they establish.
+        "default_domain_resolver": {"server": "dns-local"},
     }
 
 

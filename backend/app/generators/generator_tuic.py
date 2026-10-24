@@ -9,6 +9,8 @@ import uuid as uuid_mod
 from typing import Optional
 from urllib.parse import quote, urlencode
 
+from backend.app.generators._common import uri_host
+
 
 def generate_tuic_link(
     *,
@@ -59,7 +61,7 @@ def generate_tuic_link(
     encoded_password = quote(password, safe="")
 
     return (
-        f"tuic://{user_uuid}:{encoded_password}@{address}:{port}"
+        f"tuic://{user_uuid}:{encoded_password}@{uri_host(address)}:{port}"
         f"?{query_string}#{encoded_label}"
     )
 

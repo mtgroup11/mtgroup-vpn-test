@@ -52,6 +52,7 @@ class ProxyManager:
         server_names: List[str] = None,
         private_key: str = None,
         clients: List[Dict[str, str]] = None,
+        short_ids: List[str] = None,
     ) -> Dict[str, Any]:
         """
         Builds a dynamic JSON configuration for Xray-core utilizing VLESS and XTLS-Reality.
@@ -79,6 +80,16 @@ class ProxyManager:
         `clients`: full list of `{"uuid": ..., "email": ...}` dicts for a
         multi-user server config. Defaults to a single-client list built
         from `uuid` for backward compatibility with single-user callers.
+
+        `short_ids`: Reality short IDs to accept (e.g. `[Node.reality_short_id]`).
+        Client links carry the node's short ID, so the server must list it —
+        with only `""` accepted, every link for a node that has a short ID
+        set failed authentication. `""` is always included as well.
+
+        Traffic to private/link-local/loopback ranges is blackholed: without
+        that, any user could reach the node's own LAN and the cloud metadata
+        service (169.254.169.254, which hands out the instance's
+        credentials) through the tunnel.
         """
         if server_names is None:
             server_names = ["www.microsoft.com"]
@@ -90,6 +101,11 @@ class ProxyManager:
 
         if clients is None:
             clients = [{"uuid": uuid, "email": uuid}]
+
+        accepted_short_ids = [""]
+        for sid in short_ids or []:
+            if sid and sid not in accepted_short_ids:
+                accepted_short_ids.append(sid)
 
         config = {
             "log": {
@@ -143,7 +159,7 @@ class ProxyManager:
                             "xver": 0,
                             "serverNames": server_names,
                             "privateKey": keys["privateKey"],
-                            "shortIds": [""] # Can be generated dynamically
+                            "shortIds": accepted_short_ids
                         }
                     }
                 }
@@ -152,6 +168,10 @@ class ProxyManager:
                 {
                     "protocol": "freedom",
                     "tag": "direct"
+                },
+                {
+                    "protocol": "blackhole",
+                    "tag": "block"
                 }
             ],
             "routing": {
@@ -160,6 +180,17 @@ class ProxyManager:
                         "type": "field",
                         "inboundTag": ["api"],
                         "outboundTag": "api"
+                    },
+                    {
+                        # Explicit CIDRs rather than geoip:private, so this
+                        # doesn't depend on geoip.dat being installed.
+                        "type": "field",
+                        "ip": [
+                            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+                            "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+                            "::1/128", "fc00::/7", "fe80::/10",
+                        ],
+                        "outboundTag": "block"
                     }
                 ]
             }

@@ -24,17 +24,21 @@ from backend.app.models import HostSpoofMode
 
 
 def _params(uri: str) -> dict[str, str]:
-    return {k: v[0] for k, v in parse_qs(urlparse(uri).query).items()}
+    return {k: v[0] for k, v in parse_qs(urlparse(uri).query, keep_blank_values=True).items()}
 
 
 class TestGetFingerprint:
     def test_passthrough_for_concrete_fingerprint(self):
         assert _get_fingerprint("firefox") == "firefox"
 
-    def test_randomized_picks_from_the_known_set(self):
-        picked = {_get_fingerprint("randomized") for _ in range(50)}
-        assert picked <= {"chrome", "firefox", "safari", "edge", "ios", "android"}
-        assert picked  # non-empty
+    def test_randomized_is_passed_through_for_the_client_core_to_resolve(self):
+        # Xray and sing-box both implement "randomized" themselves; picking
+        # one server-side made every refetch return a different link.
+        assert _get_fingerprint("randomized") == "randomized"
+
+    def test_unknown_fingerprint_falls_back_to_chrome(self):
+        assert _get_fingerprint("netscape") == "chrome"
+        assert _get_fingerprint("") == "chrome"
 
 
 class TestGenerateVlessRealityLink:
@@ -52,11 +56,24 @@ class TestGenerateVlessRealityLink:
         assert p["type"] == "tcp"
         assert p["encryption"] == "none"
 
-    def test_generates_uuid_and_short_id_when_omitted(self):
+    def test_missing_short_id_is_empty_not_invented(self):
+        # A random short ID is one the node's Reality inbound doesn't list,
+        # so the link could never authenticate. "" is the conventional
+        # always-allowed entry.
         uri = generate_vless_reality_link(address="1.2.3.4", public_key="PBK")
         p = _params(uri)
-        assert len(p["sid"]) == 8  # secrets.token_hex(4)
+        assert p["sid"] == ""
         assert uri.split("://")[1].split("@")[0]  # a uuid was filled in
+
+    def test_spider_x_is_encoded_exactly_once(self):
+        p = _params(generate_vless_reality_link(address="1.2.3.4", public_key="PBK", spider_x="/a b"))
+        assert p["spx"] == "/a b"
+
+    def test_ipv6_address_is_bracketed(self):
+        uri = generate_vless_reality_link(address="2001:db8::1", user_uuid="u", public_key="PBK")
+        assert uri.startswith("vless://u@[2001:db8::1]:443?")
+        assert urlparse(uri).hostname == "2001:db8::1"
+        assert urlparse(uri).port == 443
 
     def test_fragment_param_included_when_enabled(self):
         p = _params(
@@ -78,17 +95,9 @@ class TestGenerateVlessRealityLink:
         )
         assert "fragment" not in p
 
-    def test_padding_param_included_when_enabled(self):
-        p = _params(
-            generate_vless_reality_link(
-                address="1.2.3.4", public_key="PBK", padding_enabled=True, padding_min=8, padding_max=16
-            )
-        )
-        assert p["padding"] == "8-16"
-
-    def test_padding_param_omitted_when_disabled(self):
-        p = _params(generate_vless_reality_link(address="1.2.3.4", public_key="PBK", padding_enabled=False))
-        assert "padding" not in p
+    def test_no_invented_padding_param(self):
+        # "padding" is not a VLESS share-link parameter any client reads.
+        assert "padding" not in _params(generate_vless_reality_link(address="1.2.3.4", public_key="PBK"))
 
     def test_multi_port_list_included(self):
         p = _params(
@@ -179,9 +188,9 @@ class TestGenerateVlessGrpcLink:
         assert p["pbk"] == "PBK"
         assert p["sid"] == "ffff"
 
-    def test_generates_short_id_when_reality_without_one(self):
+    def test_empty_short_id_when_reality_without_one(self):
         p = _params(generate_vless_grpc_link(address="1.2.3.4", public_key="PBK"))
-        assert len(p["sid"]) == 8
+        assert p["sid"] == ""
 
     def test_plain_tls_when_no_public_key(self):
         p = _params(generate_vless_grpc_link(address="1.2.3.4"))
@@ -198,7 +207,9 @@ class TestGenerateTrojanRealityLink:
         p = _params(generate_trojan_reality_link(address="1.2.3.4", password="pw", public_key="PBK"))
         assert p["security"] == "reality"
         assert p["pbk"] == "PBK"
-        assert len(p["sid"]) == 8
+        assert p["sid"] == ""
+        # XTLS Vision is VLESS-only; Trojan has no flow.
+        assert "flow" not in p
 
     def test_fragment_toggle(self):
         on = _params(

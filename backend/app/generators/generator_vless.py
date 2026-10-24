@@ -1,24 +1,19 @@
 """
 MTGroup VPN Ultimate — VLESS+REALITY Configuration Generator
-Generates protocol URIs with uTLS fingerprinting, TLS fragmentation,
-dynamic padding, and SNI camouflage for Streisand/V2Box/v2rayNG.
+Generates protocol URIs with uTLS fingerprinting, TLS fragmentation
+and SNI camouflage for Streisand/V2Box/v2rayNG.
 """
 
 from __future__ import annotations
 
-import random
-import secrets
 import uuid
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
+from backend.app.generators._common import normalize_fingerprint as _get_fingerprint
+from backend.app.generators._common import uri_host
 from backend.app.models import HostSpoofMode
 from backend.app.geo_camouflage import get_camouflage_for_ip
-
-def _get_fingerprint(fp: str) -> str:
-    if fp == "randomized":
-        return random.choice(["chrome", "firefox", "safari", "edge", "ios", "android"])
-    return fp
 
 
 def generate_vless_reality_link(
@@ -39,11 +34,6 @@ def generate_vless_reality_link(
     tls_fragment_size_max: int = 200,
     tls_fragment_interval_min: int = 10,
     tls_fragment_interval_max: int = 50,
-    # Dynamic padding
-    padding_enabled: bool = True,
-    padding_min: int = 64,
-    padding_max: int = 512,
-    # Multi-port hopping
     # Multi-port hopping
     port_list: Optional[list[int]] = None,
     # Geo Camouflage
@@ -57,8 +47,11 @@ def generate_vless_reality_link(
     if user_uuid is None:
         user_uuid = str(uuid.uuid4())
 
+    # The short ID must be one the node's Reality inbound actually lists in
+    # `shortIds`. Inventing a random one (as before) produced links that
+    # could never authenticate; "" is the conventional always-present entry.
     if short_id is None:
-        short_id = secrets.token_hex(4)
+        short_id = ""
 
     if client_ip:
         camo = get_camouflage_for_ip(client_ip)
@@ -71,7 +64,9 @@ def generate_vless_reality_link(
         "sid": short_id,
         "sni": sni,
         "fp": _get_fingerprint(fingerprint),
-        "spx": quote(spider_x),
+        # urlencode() below does the escaping — quoting here as well made
+        # clients receive "%2F" instead of "/".
+        "spx": spider_x,
         "flow": flow,
         "encryption": "none",
     }
@@ -84,10 +79,6 @@ def generate_vless_reality_link(
             f"{tls_fragment_interval_min}-{tls_fragment_interval_max}"
         )
 
-    # Dynamic padding injection
-    if padding_enabled:
-        params["padding"] = f"{padding_min}-{padding_max}"
-
     # Multi-port support (for clients that support port arrays)
     if port_list and len(port_list) > 1:
         params["ports"] = ",".join(str(p) for p in port_list)
@@ -95,7 +86,7 @@ def generate_vless_reality_link(
     query_string = urlencode(params)
     encoded_label = quote(label, safe="")
 
-    return f"vless://{user_uuid}@{address}:{port}?{query_string}#{encoded_label}"
+    return f"vless://{user_uuid}@{uri_host(address)}:{port}?{query_string}#{encoded_label}"
 
 
 def generate_vless_ws_link(
@@ -128,7 +119,7 @@ def generate_vless_ws_link(
         "security": "tls" if tls_enabled else "none",
         "sni": sni,
         "fp": _get_fingerprint(fingerprint),
-        "path": quote(ws_path),
+        "path": ws_path,  # escaped once, by urlencode()
         "encryption": "none",
     }
 
@@ -136,7 +127,7 @@ def generate_vless_ws_link(
     if host_spoof_mode != HostSpoofMode.NONE and spoofed_host:
         params["host"] = spoofed_host
         if host_spoof_mode == HostSpoofMode.BUG_INJECTION:
-            params["path"] = quote(f"http://{spoofed_host}{ws_path}")
+            params["path"] = f"http://{spoofed_host}{ws_path}"
     elif ws_host:
         params["host"] = ws_host
 
@@ -150,7 +141,7 @@ def generate_vless_ws_link(
     query_string = urlencode(params)
     encoded_label = quote(label, safe="")
 
-    return f"vless://{user_uuid}@{address}:{port}?{query_string}#{encoded_label}"
+    return f"vless://{user_uuid}@{uri_host(address)}:{port}?{query_string}#{encoded_label}"
 
 
 def generate_vless_grpc_link(
@@ -182,14 +173,14 @@ def generate_vless_grpc_link(
     if public_key:
         params["security"] = "reality"
         params["pbk"] = public_key
-        params["sid"] = short_id or secrets.token_hex(4)
+        params["sid"] = short_id or ""
     else:
         params["security"] = "tls"
 
     query_string = urlencode(params)
     encoded_label = quote(label, safe="")
 
-    return f"vless://{user_uuid}@{address}:{port}?{query_string}#{encoded_label}"
+    return f"vless://{user_uuid}@{uri_host(address)}:{port}?{query_string}#{encoded_label}"
 
 
 def generate_trojan_reality_link(
@@ -201,7 +192,6 @@ def generate_trojan_reality_link(
     fingerprint: str = "chrome",
     public_key: str,
     short_id: Optional[str] = None,
-    flow: str = "xtls-rprx-vision",
     label: str = "MTGroup-Trojan",
     tls_fragment_enabled: bool = True,
     tls_fragment_size_min: int = 50,
@@ -212,9 +202,11 @@ def generate_trojan_reality_link(
 ) -> str:
     """
     Generate a Trojan+REALITY URI with TLS fragmentation.
+
+    No `flow`: XTLS Vision is VLESS-only, Trojan has no flow setting.
     """
     if short_id is None:
-        short_id = secrets.token_hex(4)
+        short_id = ""
 
     if client_ip:
         camo = get_camouflage_for_ip(client_ip)
@@ -227,7 +219,6 @@ def generate_trojan_reality_link(
         "sid": short_id,
         "sni": sni,
         "fp": _get_fingerprint(fingerprint),
-        "flow": flow,
     }
 
     if tls_fragment_enabled:
@@ -239,7 +230,7 @@ def generate_trojan_reality_link(
     query_string = urlencode(params)
     encoded_label = quote(label, safe="")
 
-    return f"trojan://{quote(password)}@{address}:{port}?{query_string}#{encoded_label}"
+    return f"trojan://{quote(password, safe='')}@{uri_host(address)}:{port}?{query_string}#{encoded_label}"
 
 
 def parse_vless_link(uri: str) -> dict[str, Any]:
@@ -261,6 +252,7 @@ def parse_vless_link(uri: str) -> dict[str, Any]:
     user_part, rest = stripped.split("@", 1)
     host_part, query_part = rest.split("?", 1)
     address, port_str = host_part.rsplit(":", 1)
+    address = address.strip("[]")
 
     params = parse_qs(query_part)
     flat_params = {k: v[0] for k, v in params.items()}

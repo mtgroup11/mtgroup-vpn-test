@@ -124,9 +124,15 @@ class TestHysteria2JsonConfig:
         without = generate_hysteria2_json_config(address="1.2.3.4", password="pw", obfs_password=None)
         assert "obfs" not in without
 
-    def test_lazy_start_flag(self):
-        assert generate_hysteria2_json_config(address="1.2.3.4", password="pw", lazy_start=True)["lazy"] is True
-        assert "lazy" not in generate_hysteria2_json_config(address="1.2.3.4", password="pw", lazy_start=False)
+    def test_only_fields_singbox_defines_are_emitted(self):
+        # sing-box rejects the whole config on an unknown key; this outbound
+        # used to carry `disable_mtu_discovery` and `lazy`.
+        ob = generate_hysteria2_json_config(address="1.2.3.4", password="pw", sni="x.example.com",
+                                            obfs_password="s", server_ports=["20000:30000"], hop_interval="30s")
+        allowed = {"type", "tag", "server", "server_port", "server_ports", "hop_interval", "password",
+                   "up_mbps", "down_mbps", "obfs", "tls"}
+        assert set(ob) <= allowed
+        assert set(ob["tls"]) <= {"enabled", "server_name", "insecure", "alpn", "disable_sni"}
 
 
 class TestHysteria2ServerConfig:

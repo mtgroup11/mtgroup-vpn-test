@@ -7,7 +7,52 @@ with the official AmneziaWG client.
 
 from __future__ import annotations
 
+import secrets
 from typing import Optional
+
+from backend.app.generators._common import uri_host
+
+# WireGuard's own message types are 1..4. H1-H4 left at those values make
+# AmneziaWG handshakes byte-identical to plain WireGuard's message headers,
+# which is exactly what DPI keys on.
+_WG_MESSAGE_TYPES = {1, 2, 3, 4}
+
+
+def validate_amnezia_params(*, jc: int, jmin: int, jmax: int, s1: int, s2: int,
+                            h1: int, h2: int, h3: int, h4: int) -> None:
+    """Raise ValueError for parameter sets AmneziaWG rejects or that break
+    the tunnel. Mirrors the constraints in the AmneziaWG documentation."""
+    if not (0 <= jc <= 128):
+        raise ValueError(f"jc ({jc}) must be in range 0-128")
+    if not (0 <= jmin <= 1280):
+        raise ValueError(f"jmin ({jmin}) must be in range 0-1280")
+    if not (0 <= jmax <= 1280):
+        raise ValueError(f"jmax ({jmax}) must be in range 0-1280")
+    if jmax < jmin:
+        raise ValueError(f"jmax ({jmax}) must be >= jmin ({jmin})")
+    if not (0 <= s1 <= 1132) or not (0 <= s2 <= 1188):
+        raise ValueError("s1 must be in 0-1132 and s2 in 0-1188")
+    # The init message is 148 bytes and the response 92: if s1 + 148 ==
+    # s2 + 92 the two padded messages have the same length and can't be
+    # told apart, so AmneziaWG forbids it.
+    if s1 + 56 == s2:
+        raise ValueError(f"s1 + 56 must not equal s2 (got s1={s1}, s2={s2})")
+    headers = (h1, h2, h3, h4)
+    if any(not (0 <= h <= 4294967295) for h in headers):
+        raise ValueError("h1-h4 must be 32-bit unsigned values")
+    if len(set(headers)) != 4:
+        raise ValueError("h1-h4 must all be different")
+
+
+def random_amnezia_headers() -> dict[str, int]:
+    """Four distinct header values that don't collide with WireGuard's 1-4."""
+    picked: set[int] = set()
+    while len(picked) < 4:
+        value = 5 + secrets.randbelow(2**31 - 5)
+        if value not in _WG_MESSAGE_TYPES:
+            picked.add(value)
+    h1, h2, h3, h4 = sorted(picked)
+    return {"h1": h1, "h2": h2, "h3": h3, "h4": h4}
 
 
 def _generate_wg_keypair() -> tuple[str, str]:
@@ -80,15 +125,7 @@ def generate_amnezia_conf(
     if client_private_key is None:
         client_private_key, _ = _generate_wg_keypair()
 
-    # Validate obfuscation parameters
-    if jmax < jmin:
-        raise ValueError(f"jmax ({jmax}) must be >= jmin ({jmin})")
-    if jc < 0 or jc > 128:
-        raise ValueError(f"jc ({jc}) must be in range 0-128")
-    if not (0 <= jmin <= 1280):
-        raise ValueError(f"jmin ({jmin}) must be in range 0-1280")
-    if not (0 <= jmax <= 1280):
-        raise ValueError(f"jmax ({jmax}) must be in range 0-1280")
+    validate_amnezia_params(jc=jc, jmin=jmin, jmax=jmax, s1=s1, s2=s2, h1=h1, h2=h2, h3=h3, h4=h4)
 
     lines = [
         "[Interface]",
@@ -116,7 +153,7 @@ def generate_amnezia_conf(
 
     lines.extend([
         f"AllowedIPs = {allowed_ips}",
-        f"Endpoint = {server_endpoint}:{server_port}",
+        f"Endpoint = {uri_host(server_endpoint)}:{server_port}",
         f"PersistentKeepalive = {persistent_keepalive}",
     ])
 
@@ -201,22 +238,6 @@ def generate_amnezia_server_conf(
     return "\n".join(lines) + "\n"
 
 
-def generate_amnezia_url(
-    *,
-    conf_content: str,
-    label: str = "MTGroup-AmneziaWG",
-) -> str:
-    """
-    Generate a vpn:// deep link for AmneziaWG import.
-    Uses base64-encoded conf content in the URI.
-    """
-    import base64
-    from urllib.parse import quote
-
-    encoded = base64.b64encode(conf_content.encode("utf-8")).decode("ascii")
-    return f"vpn://{quote(label)}#{encoded}"
-
-
 def calculate_optimal_amnezia_params(
     *,
     network_type: str = "mobile",  # "mobile", "broadband", "satellite"
@@ -247,11 +268,10 @@ def calculate_optimal_amnezia_params(
     key = (network_type, aggression_level)
     params = presets.get(key, presets[("mobile", "medium")])
 
-    # Header magic values are randomized per deployment
-    import random
-    params["h1"] = random.randint(1, 2**32 - 1)
-    params["h2"] = random.randint(1, 2**32 - 1)
-    params["h3"] = random.randint(1, 2**32 - 1)
-    params["h4"] = random.randint(1, 2**32 - 1)
-
+    # Copy: the presets dict is rebuilt per call today, but don't rely on it.
+    params = dict(params)
+    # Header magic values are randomized per deployment — distinct, and
+    # never WireGuard's own 1-4.
+    params.update(random_amnezia_headers())
+    validate_amnezia_params(**params)
     return params

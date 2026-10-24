@@ -180,3 +180,22 @@ class TestDeployConfig:
 
         with pytest.raises(PrivilegedHelperError):
             await manager.deploy_config("node-1", {"inbounds": []}, filepath=str(target))
+
+
+class TestServerHardening:
+    def test_accepts_the_nodes_short_id_as_well_as_empty(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u", private_key="k", short_ids=["abcd1234"])
+        assert config["inbounds"][1]["streamSettings"]["realitySettings"]["shortIds"] == ["", "abcd1234"]
+
+    def test_default_short_ids_is_just_empty(self, manager):
+        config = manager.build_vless_reality_config(port=443, uuid="u", private_key="k")
+        assert config["inbounds"][1]["streamSettings"]["realitySettings"]["shortIds"] == [""]
+
+    def test_private_and_metadata_ranges_are_blackholed(self, manager):
+        import ipaddress
+        config = manager.build_vless_reality_config(port=443, uuid="u", private_key="k")
+        rule = next(r for r in config["routing"]["rules"] if r.get("outboundTag") == "block")
+        nets = [ipaddress.ip_network(n) for n in rule["ip"]]
+        for addr in ("169.254.169.254", "10.0.0.5", "192.168.1.1", "127.0.0.1", "fd00::1"):
+            assert any(ipaddress.ip_address(addr) in n for n in nets), addr
+        assert {"protocol": "blackhole", "tag": "block"} in config["outbounds"]

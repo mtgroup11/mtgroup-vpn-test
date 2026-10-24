@@ -5,6 +5,7 @@ YAML config output compatible with Clash Meta, Stash, and similar clients.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 import yaml
@@ -19,8 +20,8 @@ IRAN_RULES = [
     "GEOSITE,category-bank-ir,DIRECT",
     "GEOSITE,category-bourse-ir,DIRECT",
     "GEOSITE,category-gov-ir,DIRECT",
+    "DOMAIN-SUFFIX,ir,DIRECT",  # mihomo suffixes take no leading dot
     "GEOIP,ir,DIRECT",
-    "DOMAIN-SUFFIX,.ir,DIRECT",
 ]
 
 GAMER_RULES = [
@@ -69,10 +70,13 @@ def generate_clash_config(
         "unified-delay": True,
         "tcp-concurrent": True,
         "geodata-mode": True,
+        # Full geoip.dat, not geoip-lite.dat: the lite file carries only ~12
+        # codes and no "ir", so `GEOIP,ir,DIRECT` made mihomo reject the
+        # whole config for every Iran-bypass user.
         "geox-url": {
-            "geoip": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat",
+            "geoip": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
             "geosite": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
-            "mmdb": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.metadb",
+            "mmdb": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb",
         },
         "find-process-mode": "strict",
         "global-client-fingerprint": "chrome",
@@ -103,7 +107,9 @@ def _build_clash_dns(
     """Build Clash DNS configuration."""
     dns_config: dict[str, Any] = {
         "enable": True,
-        "listen": "0.0.0.0:1053",
+        # Loopback only: binding the resolver on 0.0.0.0 offered an open DNS
+        # resolver to everyone on the user's network.
+        "listen": "127.0.0.1:1053",
         "ipv6": False,
         "enhanced-mode": "fake-ip",
         "fake-ip-range": "198.18.0.1/16",
@@ -130,6 +136,10 @@ def _build_clash_dns(
 
 def _build_proxy_groups(proxy_names: list[str]) -> list[dict[str, Any]]:
     """Build proxy groups with auto-select and fallback."""
+    # url-test / fallback groups with an empty `proxies` list are a hard
+    # config error in mihomo. Callers should not render a config with no
+    # proxies at all, but if one slips through it must still load.
+    members = proxy_names or ["DIRECT"]
     return [
         {
             "name": "🚀 Proxy",
@@ -139,7 +149,7 @@ def _build_proxy_groups(proxy_names: list[str]) -> list[dict[str, Any]]:
         {
             "name": "♻️ Auto",
             "type": "url-test",
-            "proxies": proxy_names,
+            "proxies": members,
             "url": "https://www.gstatic.com/generate_204",
             "interval": 300,
             "tolerance": 50,
@@ -157,11 +167,18 @@ def _build_proxy_groups(proxy_names: list[str]) -> list[dict[str, Any]]:
         {
             "name": "🛡️ Fallback",
             "type": "fallback",
-            "proxies": proxy_names,
+            "proxies": members,
             "url": "https://www.gstatic.com/generate_204",
             "interval": 300,
         },
     ]
+
+
+_DOMAIN_RE = re.compile(r"^\.?(?:[A-Za-z0-9-]{1,63}\.)*[A-Za-z0-9-]{1,63}$")
+
+
+def _is_plain_domain(value: str) -> bool:
+    return isinstance(value, str) and bool(_DOMAIN_RE.match(value.strip()))
 
 
 def _build_clash_rules(
@@ -181,13 +198,14 @@ def _build_clash_rules(
     if gamer_mode:
         rules.extend(GAMER_RULES)
 
-    # Custom split tunnel bypass
-    for domain in split_bypass_domains:
-        rules.append(f"DOMAIN-SUFFIX,{domain},DIRECT")
+    # Custom split tunnel bypass / force. Entries are user-supplied and a
+    # rule is a comma-separated string, so anything that isn't a plain
+    # domain (a comma would inject extra rule fields) is skipped.
+    for domain in filter(_is_plain_domain, split_bypass_domains):
+        rules.append(f"DOMAIN-SUFFIX,{domain.strip().lstrip('.')},DIRECT")
 
-    # Custom split tunnel force
-    for domain in split_force_domains:
-        rules.append(f"DOMAIN-SUFFIX,{domain},🚀 Proxy")
+    for domain in filter(_is_plain_domain, split_force_domains):
+        rules.append(f"DOMAIN-SUFFIX,{domain.strip().lstrip('.')},🚀 Proxy")
 
     # Streaming services through proxy
     rules.extend([
@@ -260,9 +278,9 @@ def generate_clash_hysteria2_proxy(
     obfs_password: Optional[str] = None,
     up_mbps: int = 50,
     down_mbps: int = 100,
-    fingerprint: str = "chrome",
 ) -> dict[str, Any]:
-    """Generate a Clash Meta Hysteria2 proxy dict."""
+    """Generate a Clash Meta Hysteria2 proxy dict. (No client-fingerprint:
+    uTLS doesn't apply to QUIC.)"""
     proxy: dict[str, Any] = {
         "name": name,
         "type": "hysteria2",
@@ -271,7 +289,6 @@ def generate_clash_hysteria2_proxy(
         "password": password,
         "up": f"{up_mbps} Mbps",
         "down": f"{down_mbps} Mbps",
-        "client-fingerprint": fingerprint,
     }
 
     if sni:

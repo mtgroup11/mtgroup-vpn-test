@@ -12,6 +12,7 @@ import io
 import json
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.auth import get_db
 from backend.app.core.config import settings
 from backend.app.core.security import derive_proxy_uuid
+from backend.app.generators._common import normalize_fingerprint
 from backend.app.core.wireguard_peers import NoAddressesAvailable, get_or_create_peer
 from backend.app.generators.generator_amnezia import generate_amnezia_conf
 from backend.app.generators.generator_clash import (
@@ -83,23 +85,41 @@ async def _get_active_nodes(db: AsyncSession) -> list[Node]:
     return list(result.scalars().all())
 
 
+# Clients known to import a full sing-box JSON profile from a subscription
+# URL. Everything else gets base64 share links, the one format every client
+# understands — the old default (sing-box JSON for any unknown UA) handed
+# Shadowrocket, FoXray, V2Box, Happ etc. a file they cannot import.
+_SINGBOX_CLIENTS = ("sing-box", "singbox", "sfa", "sfi", "sfm", "sft", "hiddify", "streisand", "karing")
+_CLASH_CLIENTS = ("clash", "mihomo", "stash", "flclash")
+
+
 def _detect_client(user_agent: str) -> str:
     """Detect client type from User-Agent header."""
     ua_lower = user_agent.lower()
-    if "streisand" in ua_lower:
-        return "singbox"
-    if "nekobox" in ua_lower or "neko" in ua_lower:
-        return "singbox"
-    if "v2box" in ua_lower:
-        return "singbox"
-    if "clash" in ua_lower or "mihomo" in ua_lower or "stash" in ua_lower:
-        return "clash"
-    if "v2ray" in ua_lower or "v2rayng" in ua_lower:
-        return "v2ray"
     if "amnezia" in ua_lower:
         return "amnezia"
-    # Default to singbox for unknown clients
-    return "singbox"
+    if any(name in ua_lower for name in _CLASH_CLIENTS):
+        return "clash"
+    if any(name in ua_lower for name in _SINGBOX_CLIENTS):
+        return "singbox"
+    return "v2ray"
+
+
+def _attachment(filename: str) -> str:
+    """Content-Disposition value safe for any label.
+
+    Header values must be latin-1; a Persian or emoji subscription label /
+    node name used to raise UnicodeEncodeError (a 500) on every fetch.
+    RFC 6266: ASCII fallback in `filename`, the real name in `filename*`.
+    """
+    ascii_name = filename.encode("ascii", "ignore").decode().replace('"', "").strip() or "mtgroup"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def _no_matching_servers() -> HTTPException:
+    # Rendering anyway produced configs with an empty url-test group, which
+    # sing-box and mihomo both refuse to load at all.
+    return HTTPException(status_code=503, detail="No servers available for your subscription's protocols")
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +191,7 @@ async def get_singbox_config(
                     "server_name": node.sni or settings.DEFAULT_SNI,
                     "utls": {
                         "enabled": True,
-                        "fingerprint": settings.DEFAULT_FINGERPRINT,
+                        "fingerprint": normalize_fingerprint(settings.DEFAULT_FINGERPRINT),
                     },
                     "reality": {
                         "enabled": True,
@@ -207,6 +227,9 @@ async def get_singbox_config(
             )
             outbounds[-1]["tag"] = f"tuic-{node.name}"
 
+    if not outbounds:
+        raise _no_matching_servers()
+
     config = generate_singbox_config(
         outbounds=outbounds,
         iran_bypass=sub.iran_bypass,
@@ -226,7 +249,7 @@ async def get_singbox_config(
         content=content,
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="{sub.label}.json"',
+            "Content-Disposition": _attachment(f"{sub.label}.json"),
             "Subscription-Userinfo": _build_userinfo_header(user),
             "Profile-Title": f"base64:{base64.b64encode(sub.label.encode()).decode()}",
             "Profile-Update-Interval": "6",
@@ -269,6 +292,7 @@ async def get_clash_config(
                 port=node.port,
                 uuid=user_uuid,
                 sni=node.sni or settings.DEFAULT_SNI,
+                fingerprint=normalize_fingerprint(settings.DEFAULT_FINGERPRINT),
                 reality_public_key=node.reality_public_key,
                 reality_short_id=node.reality_short_id,
             ))
@@ -290,6 +314,9 @@ async def get_clash_config(
                 sni=node.sni,
             ))
 
+    if not proxies:
+        raise _no_matching_servers()
+
     yaml_content = generate_clash_config(
         proxies=proxies,
         iran_bypass=sub.iran_bypass,
@@ -303,7 +330,7 @@ async def get_clash_config(
         content=yaml_content,
         media_type="text/yaml",
         headers={
-            "Content-Disposition": f'attachment; filename="{sub.label}.yaml"',
+            "Content-Disposition": _attachment(f"{sub.label}.yaml"),
             "Subscription-Userinfo": _build_userinfo_header(user),
             "Profile-Title": f"base64:{base64.b64encode(sub.label.encode()).decode()}",
             "Profile-Update-Interval": "6",
@@ -345,6 +372,7 @@ async def get_v2ray_links(
                 sni=node.sni or settings.DEFAULT_SNI,
                 public_key=node.reality_public_key or "",
                 short_id=node.reality_short_id,
+                fingerprint=normalize_fingerprint(settings.DEFAULT_FINGERPRINT),
                 label=f"MTGroup-{node.name}",
                 tls_fragment_enabled=settings.TLS_FRAGMENT_ENABLED,
                 tls_fragment_size_min=settings.TLS_FRAGMENT_SIZE_MIN,
@@ -371,6 +399,9 @@ async def get_v2ray_links(
                 sni=node.sni,
                 label=f"MTGroup-{node.name}",
             ))
+
+    if not links:
+        raise _no_matching_servers()
 
     content = base64.b64encode("\n".join(links).encode("utf-8")).decode("ascii")
 
@@ -497,7 +528,7 @@ async def get_amnezia_config(
         content=conf,
         media_type="text/plain",
         headers={
-            "Content-Disposition": f'attachment; filename="MTGroup-{node.name}.conf"',
+            "Content-Disposition": _attachment(f"MTGroup-{node.name}.conf"),
         },
     )
 

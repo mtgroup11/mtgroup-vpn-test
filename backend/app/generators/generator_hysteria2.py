@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Optional
 from urllib.parse import quote, urlencode
 
+from backend.app.generators._common import uri_host
+
 
 def generate_hysteria2_link(
     *,
@@ -66,7 +68,7 @@ def generate_hysteria2_link(
     encoded_label = quote(label, safe="")
     encoded_password = quote(password, safe="")
 
-    uri = f"hysteria2://{encoded_password}@{address}:{port}"
+    uri = f"hysteria2://{encoded_password}@{uri_host(address)}:{port}"
     if query_string:
         uri += f"?{query_string}"
     uri += f"#{encoded_label}"
@@ -85,16 +87,18 @@ def generate_hysteria2_json_config(
     obfs_password: Optional[str] = None,
     up_mbps: int = 50,
     down_mbps: int = 100,
-    # Advanced tuning
-    disable_mtu_discovery: bool = True,
-    quic_initial_rtt_ms: int = 100,
-    quic_max_idle_timeout_sec: int = 30,
-    retry_interval_sec: int = 1,
-    lazy_start: bool = False,
+    # Server-side port hopping (sing-box >= 1.11): e.g. ["20000:30000"]
+    server_ports: Optional[list[str]] = None,
+    hop_interval: Optional[str] = None,
 ) -> dict:
     """
-    Generate a Hysteria2 JSON configuration block for Sing-box integration.
-    This provides more granular control than the URI format.
+    Generate a Hysteria2 outbound for sing-box.
+
+    Only fields sing-box's hysteria2 outbound actually defines are emitted:
+    sing-box decodes configs strictly, so a single unknown key (this used
+    to add `disable_mtu_discovery` and `lazy`, neither of which exists
+    there) makes the client reject the *entire* subscription, not just
+    this outbound.
     """
     config: dict = {
         "type": "hysteria2",
@@ -125,11 +129,10 @@ def generate_hysteria2_json_config(
             "password": obfs_password,
         }
 
-    if disable_mtu_discovery:
-        config["disable_mtu_discovery"] = True
-
-    if lazy_start:
-        config["lazy"] = True
+    if server_ports:
+        config["server_ports"] = server_ports
+        if hop_interval:
+            config["hop_interval"] = hop_interval
 
     return config
 

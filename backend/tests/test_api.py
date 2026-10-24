@@ -429,7 +429,7 @@ class TestGenerators:
         assert "route" in config
         rules = config["route"]["rules"]
         # Check Iran bypass rules exist
-        iran_rules = [r for r in rules if r.get("outbound") == "direct" and ".ir" in str(r)]
+        iran_rules = [r for r in rules if r.get("outbound") == "direct" and "ir" in r.get("domain_suffix", [])]
         assert len(iran_rules) > 0
 
     def test_clash_config(self):
