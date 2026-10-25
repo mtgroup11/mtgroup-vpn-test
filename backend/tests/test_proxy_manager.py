@@ -61,7 +61,7 @@ class TestBuildVlessRealityConfig:
     def test_defaults_server_names_when_not_provided(self, manager):
         config = manager.build_vless_reality_config(port=443, uuid="u")
         reality = _vless_inbound(config)["streamSettings"]["realitySettings"]
-        assert reality["serverNames"] == ["www.microsoft.com"]
+        assert reality["serverNames"] == ["www.samsung.com"]
 
     def test_output_is_json_serialisable(self, manager):
         config = manager.build_vless_reality_config(port=443, uuid="u")

@@ -60,12 +60,12 @@ GEO_SNI_MAP: dict[str, list[dict[str, str]]] = {
     ],
     "TR": [
         {"sni": "www.google.com",       "dest": "www.google.com:443",       "label": "Google"},
-        {"sni": "www.microsoft.com",    "dest": "www.microsoft.com:443",    "label": "Microsoft"},
+        {"sni": "www.samsung.com",      "dest": "www.samsung.com:443",      "label": "Samsung"},
         {"sni": "cdn.jsdelivr.net",     "dest": "cdn.jsdelivr.net:443",     "label": "jsDelivr CDN"},
     ],
     "GLOBAL": [
         {"sni": "www.google.com",       "dest": "www.google.com:443",       "label": "Google"},
-        {"sni": "www.microsoft.com",    "dest": "www.microsoft.com:443",    "label": "Microsoft"},
+        {"sni": "www.samsung.com",      "dest": "www.samsung.com:443",      "label": "Samsung"},
         {"sni": "www.apple.com",        "dest": "www.apple.com:443",        "label": "Apple"},
         {"sni": "cdn.cloudflare.com",   "dest": "cdn.cloudflare.com:443",   "label": "Cloudflare"},
         {"sni": "www.amazon.com",       "dest": "www.amazon.com:443",       "label": "Amazon"},

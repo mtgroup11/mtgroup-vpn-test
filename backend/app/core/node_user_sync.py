@@ -86,7 +86,9 @@ def build_node_config(node: Node, tokens: list[str]) -> dict[str, Any]:
         # email == id: Xray keys per-user stats on email, and accounting's
         # _ingest_xray_traffic maps that key back through derive_proxy_uuid.
         clients.append({"uuid": cred, "email": cred})
-    sni = node.sni or "www.microsoft.com"
+    # Not www.microsoft.com: as a Reality cover it rejected every client in
+    # a real Xray 25.3 test ("REALITY: processed invalid connection").
+    sni = node.sni or "www.samsung.com"
     return ProxyManager().build_vless_reality_config(
         port=node.port,
         uuid=clients[0]["uuid"] if clients else "",

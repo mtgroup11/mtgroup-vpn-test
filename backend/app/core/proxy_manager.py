@@ -48,7 +48,7 @@ class ProxyManager:
         self,
         port: int,
         uuid: str,
-        sni_dest: str = "www.microsoft.com:443",
+        sni_dest: str = "www.samsung.com:443",
         server_names: List[str] = None,
         private_key: str = None,
         clients: List[Dict[str, str]] = None,
@@ -92,7 +92,7 @@ class ProxyManager:
         credentials) through the tunnel.
         """
         if server_names is None:
-            server_names = ["www.microsoft.com"]
+            server_names = ["www.samsung.com"]
 
         if private_key:
             keys = {"privateKey": private_key}
