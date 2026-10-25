@@ -122,6 +122,16 @@ def _attachment(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
+def _tls_sni(node: Node) -> str | None:
+    """SNI for the plain-TLS protocols (Hysteria2, TUIC).
+
+    They verify the server's certificate, so this has to be the node's real
+    domain (`tls_domain`). `sni` is a Reality cover domain the node holds no
+    certificate for; it is only a fallback for nodes set up by hand.
+    """
+    return node.tls_domain or node.sni
+
+
 def _no_matching_servers() -> HTTPException:
     # Rendering anyway produced configs with an empty url-test group, which
     # sing-box and mihomo both refuse to load at all.
@@ -214,7 +224,7 @@ async def get_singbox_config(
                     address=address,
                     port=node.port,
                     password=user_uuid,
-                    sni=node.sni,
+                    sni=_tls_sni(node),
                     up_mbps=min(user.bandwidth_limit_mbps or 50, 50),
                     down_mbps=min(user.bandwidth_limit_mbps or 100, 100),
                 )
@@ -228,7 +238,7 @@ async def get_singbox_config(
                     port=node.port,
                     user_uuid=user_uuid,
                     password=user_uuid[:16],
-                    sni=node.sni,
+                    sni=_tls_sni(node),
                 )
             )
             outbounds[-1]["tag"] = f"tuic-{node.name}"
@@ -308,7 +318,7 @@ async def get_clash_config(
                 server=address,
                 port=node.port,
                 password=user_uuid,
-                sni=node.sni,
+                sni=_tls_sni(node),
             ))
         elif node.protocol == NodeProtocol.TUIC_V5:
             proxies.append(generate_clash_tuic_proxy(
@@ -317,7 +327,7 @@ async def get_clash_config(
                 port=node.port,
                 uuid=user_uuid,
                 password=user_uuid[:16],
-                sni=node.sni,
+                sni=_tls_sni(node),
             ))
 
     if not proxies:
@@ -392,7 +402,7 @@ async def get_v2ray_links(
                 address=address,
                 port=node.port,
                 password=user_uuid,
-                sni=node.sni,
+                sni=_tls_sni(node),
                 label=f"MTGroup-{node.name}",
             ))
 
@@ -402,7 +412,7 @@ async def get_v2ray_links(
                 port=node.port,
                 user_uuid=user_uuid,
                 password=user_uuid[:16],
-                sni=node.sni,
+                sni=_tls_sni(node),
                 label=f"MTGroup-{node.name}",
             ))
 
@@ -622,7 +632,7 @@ async def get_raw_links(
                 address=address,
                 port=node.port,
                 password=user_uuid,
-                sni=node.sni,
+                sni=_tls_sni(node),
                 label=f"MTGroup-{node.name}",
             ))
         elif node.protocol == NodeProtocol.TUIC_V5:
@@ -631,7 +641,7 @@ async def get_raw_links(
                 port=node.port,
                 user_uuid=user_uuid,
                 password=user_uuid[:16],
-                sni=node.sni,
+                sni=_tls_sni(node),
                 label=f"MTGroup-{node.name}",
             ))
 

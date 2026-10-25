@@ -72,6 +72,7 @@ async def create_node(
         reality_public_key=body.reality_public_key,
         reality_private_key=body.reality_private_key,
         reality_short_id=body.reality_short_id,
+        tls_domain=body.tls_domain,
         tls_cert_path=body.tls_cert_path,
         tls_key_path=body.tls_key_path,
         api_key=generate_api_key(),
@@ -220,6 +221,13 @@ async def get_agent_setup(
         raise HTTPException(status_code=404, detail="Node not found")
 
     audit_logger.log_admin_action(admin_username=admin.username, action="view_agent_setup", target=node.name)
+    needs_cert = node.protocol in (NodeProtocol.HYSTERIA2, NodeProtocol.TUIC_V5)
+    if needs_cert and not node.tls_domain:
+        raise HTTPException(
+            status_code=400,
+            detail="Hysteria2/TUIC nodes need tls_domain (a domain whose DNS A record points at this node) first",
+        )
+    extra_env = f"MTGROUP_TLS_DOMAIN='{node.tls_domain}' " if needs_cert else ""
     return {
         "node_id": node.id,
         "api_key": node.api_key,
@@ -227,7 +235,7 @@ async def get_agent_setup(
         "agent_cert_fingerprint": node.agent_cert_fingerprint,
         "install_command": (
             f"sudo MTGROUP_NODE_API_KEY='{node.api_key}' MTGROUP_NODE_PORT={node.agent_port} "
-            "bash agent/install_agent.sh"
+            f"{extra_env}bash agent/install_agent.sh"
         ),
         "next_step": (
             "Paste the certificate the installer prints into this node's agent_cert_pem "

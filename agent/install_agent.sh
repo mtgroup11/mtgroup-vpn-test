@@ -43,6 +43,55 @@ case "$PORT" in
     ''|*[!0-9]*) echo "❌ MTGROUP_NODE_PORT must be a number." >&2; exit 1 ;;
 esac
 
+# ── Hysteria2 / TUIC nodes: sing-box + a real certificate ────────────────
+# Set MTGROUP_TLS_DOMAIN (the panel's agent-setup command does, for those
+# nodes) to a domain whose DNS A/AAAA record points at this server — with
+# any CDN proxy (Cloudflare's orange cloud) OFF, since both are UDP.
+# The certificate comes from Let's Encrypt over HTTP-01, so TCP 80 must be
+# reachable from the internet while this runs and at each renewal.
+TLS_DOMAIN="${MTGROUP_TLS_DOMAIN:-}"
+# Not under $ETC_DIR (0700 root): newer sing-box packages run as user sing-box.
+PUBLIC_TLS_DIR="/etc/sing-box/mtgroup-tls"
+if [ -n "$TLS_DOMAIN" ]; then
+    if ! echo "$TLS_DOMAIN" | grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'; then
+        echo "❌ MTGROUP_TLS_DOMAIN must be a plain lower-case domain name." >&2
+        exit 1
+    fi
+    if ! command -v sing-box >/dev/null 2>&1; then
+        echo "Installing sing-box from the official SagerNet apt repository..."
+        apt-get update && apt-get install -y curl gnupg
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
+        chmod a+r /etc/apt/keyrings/sagernet.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *" \
+            > /etc/apt/sources.list.d/sagernet.list
+        apt-get update && apt-get install -y sing-box
+    fi
+    command -v certbot >/dev/null 2>&1 || { apt-get update && apt-get install -y certbot; }
+
+    # Copies the live certificate to fixed paths the panel's sing-box config
+    # points at, and reloads sing-box — on first issue and every renewal.
+    HOOK=/etc/letsencrypt/renewal-hooks/deploy/mtgroup-sing-box.sh
+    mkdir -p "$(dirname "$HOOK")" "$PUBLIC_TLS_DIR"
+    cat > "$HOOK" <<EOF
+#!/bin/sh
+set -e
+[ "\$RENEWED_LINEAGE" = "/etc/letsencrypt/live/$TLS_DOMAIN" ] || exit 0
+install -m 600 "\$RENEWED_LINEAGE/fullchain.pem" "$PUBLIC_TLS_DIR/fullchain.pem"
+install -m 600 "\$RENEWED_LINEAGE/privkey.pem" "$PUBLIC_TLS_DIR/privkey.pem"
+if id sing-box >/dev/null 2>&1; then chown -R sing-box: "$PUBLIC_TLS_DIR"; fi
+systemctl restart sing-box || true
+EOF
+    chmod 755 "$HOOK"
+
+    echo "Requesting a Let's Encrypt certificate for $TLS_DOMAIN (needs TCP 80 open)..."
+    certbot certonly --standalone --non-interactive --agree-tos \
+        --register-unsafely-without-email --keep-until-expiring -d "$TLS_DOMAIN"
+    RENEWED_LINEAGE="/etc/letsencrypt/live/$TLS_DOMAIN" "$HOOK"
+    systemctl enable sing-box >/dev/null 2>&1 || true
+    echo "✅ Certificate for $TLS_DOMAIN installed; certbot renews it automatically."
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
     echo "Installing python3..."
     apt-get update && apt-get install -y python3 python3-venv
@@ -111,6 +160,9 @@ fi
 
 echo "----------------------------------------------------------"
 echo "Allow the panel to reach TCP $PORT on this node (and only the panel, if you can)."
+if [ -n "$TLS_DOMAIN" ]; then
+    echo "Open the node's VPN port for UDP (Hysteria2/TUIC), and keep TCP 80 open for certificate renewals."
+fi
 echo "Then paste this certificate into the node's 'agent_cert_pem' in the panel:"
 echo
 cat "$ETC_DIR/agent-cert.pem"

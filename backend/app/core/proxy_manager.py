@@ -16,6 +16,17 @@ logger = logging.getLogger("mtgroup.proxy_manager")
 XRAY_API_PORT = 10085
 
 
+
+# Destinations a client must never reach *through* a node: the node's own
+# loopback services (agent, Xray API), its LAN and the cloud metadata
+# endpoint (169.254.169.254). Shared by the Xray and sing-box server configs.
+BLOCKED_DESTINATION_CIDRS = (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+    "::1/128", "fc00::/7", "fe80::/10",
+)
+
+
 class ProxyManager:
     """
     Manages Xray-core configurations dynamically for DPI Evasion.
@@ -185,11 +196,7 @@ class ProxyManager:
                         # Explicit CIDRs rather than geoip:private, so this
                         # doesn't depend on geoip.dat being installed.
                         "type": "field",
-                        "ip": [
-                            "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-                            "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
-                            "::1/128", "fc00::/7", "fe80::/10",
-                        ],
+                        "ip": list(BLOCKED_DESTINATION_CIDRS),
                         "outboundTag": "block"
                     }
                 ]

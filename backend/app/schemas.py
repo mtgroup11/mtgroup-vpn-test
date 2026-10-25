@@ -180,6 +180,19 @@ def validate_short_id(value: Optional[str]) -> Optional[str]:
     return value
 
 
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def validate_tls_domain(value: Optional[str]) -> Optional[str]:
+    """A DNS name for Hysteria2/TUIC certificates. "" clears it."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip().lower().rstrip(".")
+    if len(value) > 253 or not _DOMAIN_RE.match(value):
+        raise ValueError("tls_domain must be a domain name like de1.example.com (no scheme, port or path)")
+    return value
+
+
 def validate_agent_cert_pem(value: Optional[str]) -> Optional[str]:
     """The node agent's certificate as printed by
     `python -m agent.node_daemon --print-cert`. Parsed here so a typo is a
@@ -205,6 +218,7 @@ class NodeCreate(BaseModel):
     reality_public_key: Optional[str] = None
     reality_private_key: Optional[str] = None
     reality_short_id: Optional[str] = None
+    tls_domain: Optional[str] = Field(default=None, max_length=253)
     tls_cert_path: Optional[str] = None
     tls_key_path: Optional[str] = None
     cloud_provider: Optional[str] = None
@@ -231,6 +245,7 @@ class NodeCreate(BaseModel):
 
     _check_short_id = field_validator("reality_short_id")(validate_short_id)
     _check_agent_cert = field_validator("agent_cert_pem")(validate_agent_cert_pem)
+    _check_tls_domain = field_validator("tls_domain")(validate_tls_domain)
 
     @model_validator(mode="after")
     def validate_port_range(self) -> "NodeCreate":
@@ -249,6 +264,8 @@ class NodeUpdate(BaseModel):
     is_active: Optional[bool] = None
     protocol: Optional[NodeProtocol] = None
     sni: Optional[str] = None
+    # Send "" to clear.
+    tls_domain: Optional[str] = Field(default=None, max_length=253)
     reality_public_key: Optional[str] = None
     reality_private_key: Optional[str] = None
     reality_short_id: Optional[str] = None
@@ -272,6 +289,7 @@ class NodeUpdate(BaseModel):
     amnezia_h4: Optional[int] = Field(default=None, ge=0, le=4294967295)
 
     _check_short_id = field_validator("reality_short_id")(validate_short_id)
+    _check_tls_domain = field_validator("tls_domain")(validate_tls_domain)
 
     @field_validator("agent_cert_pem")
     @classmethod
@@ -293,6 +311,7 @@ class NodeResponse(BaseModel):
     is_active: bool
     protocol: NodeProtocol
     sni: Optional[str]
+    tls_domain: Optional[str] = None
     reality_public_key: Optional[str]
     reality_short_id: Optional[str]
     floating_ip: Optional[str]

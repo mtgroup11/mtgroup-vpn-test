@@ -516,6 +516,12 @@ class Node(Base):
     sni: Mapped[Optional[str]] = mapped_column(
         String(256), nullable=True, default="www.google.com"
     )
+    # Hysteria2 / TUIC only: a real domain pointing at this node, with a
+    # publicly trusted certificate on the node (install_agent.sh obtains one
+    # from Let's Encrypt). Unlike Reality these protocols do plain TLS, so
+    # the client must be able to verify the server — `sni` (a Reality cover
+    # domain) can't work there.
+    tls_domain: Mapped[Optional[str]] = mapped_column(String(253), nullable=True, default=None)
 
     # Floating IP / Cloud
     floating_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

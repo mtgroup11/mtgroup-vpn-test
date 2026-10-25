@@ -1,7 +1,8 @@
 """
 MTGroup VPN Ultimate — Node user provisioning
 
-Keeps every VLESS-Reality node's Xray config in step with the panel's users.
+Keeps every VLESS-Reality node's Xray config — and every Hysteria2/TUIC
+node's sing-box config — in step with the panel's users.
 
 Nothing did this before. Subscriptions handed out per-user credentials, but
 no code path ever told a node which credentials were valid — the server
@@ -25,7 +26,12 @@ last config that node accepted. A loop does this every
 NODE_USER_SYNC_INTERVAL_SEC; `request_sync()` wakes it early after any user
 change so new users work within seconds.
 
-It owns the node's Xray config outright, which would overwrite a hand-tuned
+Hysteria2/TUIC nodes get a full sing-box server config the same way
+(`build_singbox_server_config`), once they have a `tls_domain`: those
+protocols do plain TLS, so the node needs a real certificate for a real
+domain, which install_agent.sh obtains.
+
+It owns the node's Xray/sing-box config outright, which would overwrite a hand-tuned
 one, so it only runs when NODE_USER_SYNC_ENABLED is set.
 """
 
@@ -40,7 +46,7 @@ from typing import Any
 
 from sqlalchemy import and_, or_, select
 
-from backend.app.core.proxy_manager import ProxyManager
+from backend.app.core.proxy_manager import BLOCKED_DESTINATION_CIDRS, ProxyManager
 from backend.app.core.security import derive_proxy_uuid
 from backend.app.models import Node, NodeProtocol, Subscription, User, WireGuardPeer
 
@@ -100,6 +106,53 @@ def build_node_config(node: Node, tokens: list[str]) -> dict[str, Any]:
     )
 
 
+# Where install_agent.sh's Let's Encrypt deploy hook copies the node's
+# certificate (fixed paths, so a renewal needs no config change).
+PUBLIC_TLS_CERT = "/etc/sing-box/mtgroup-tls/fullchain.pem"
+PUBLIC_TLS_KEY = "/etc/sing-box/mtgroup-tls/privkey.pem"
+
+SINGBOX_PROTOCOLS = (NodeProtocol.HYSTERIA2, NodeProtocol.TUIC_V5)
+
+
+def build_singbox_server_config(node: Node, tokens: list[str]) -> dict[str, Any]:
+    """The full sing-box server config for a Hysteria2 or TUIC node.
+
+    Credentials must match what subscriptions hand out for this node:
+    Hysteria2 password = derive_proxy_uuid(token, node.id); TUIC uuid = that
+    value and password = its first 16 characters.
+    """
+    tls = {
+        "enabled": True,
+        "server_name": node.tls_domain,
+        "alpn": ["h3"],
+        "certificate_path": node.tls_cert_path or PUBLIC_TLS_CERT,
+        "key_path": node.tls_key_path or PUBLIC_TLS_KEY,
+    }
+    creds = [derive_proxy_uuid(token, node.id) for token in tokens]
+    if node.protocol == NodeProtocol.HYSTERIA2:
+        inbound = {
+            "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": node.port,
+            "users": [{"name": c, "password": c} for c in creds],
+            "tls": tls,
+        }
+    else:
+        inbound = {
+            "type": "tuic", "tag": "tuic-in", "listen": "::", "listen_port": node.port,
+            "users": [{"name": c, "uuid": c, "password": c[:16]} for c in creds],
+            "congestion_control": "bbr",
+            "tls": tls,
+        }
+    return {
+        "log": {"level": "warn"},
+        "inbounds": [inbound],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {
+            "rules": [{"ip_cidr": list(BLOCKED_DESTINATION_CIDRS), "action": "reject"}],
+            "final": "direct",
+        },
+    }
+
+
 def _digest(config: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
@@ -124,25 +177,40 @@ class NodeUserSync:
         {node_id: accepted} for the nodes it attempted."""
         async with self._db_session_factory() as session:
             nodes = list((await session.execute(
-                select(Node).where(Node.is_active.is_(True), Node.protocol == NodeProtocol.VLESS_REALITY)
+                select(Node).where(
+                    Node.is_active.is_(True),
+                    Node.protocol.in_((NodeProtocol.VLESS_REALITY, *SINGBOX_PROTOCOLS)),
+                )
             )).scalars().all())
             eligible = await eligible_subscriptions(session)
         tokens = [token for _, token in eligible]
 
         results: dict[int, bool] = {}
         for node in nodes:
-            if not node.reality_private_key:
+            if node.protocol in SINGBOX_PROTOCOLS:
+                if not node.tls_domain:
+                    logger.warning(
+                        "Node %s (%s) is %s but has no tls_domain; its users are not being "
+                        "provisioned.", node.id, node.name, node.protocol.value,
+                    )
+                    continue
+                config = build_singbox_server_config(node, tokens)
+                # The agent picks the sing-box config path/unit from this label.
+                config_type = f"singbox-{node.protocol.value}"
+            elif not node.reality_private_key:
                 logger.warning(
                     "Node %s (%s) has no reality_private_key on file; can't render its "
                     "server config, so its users are not being provisioned.", node.id, node.name,
                 )
                 continue
-            config = build_node_config(node, tokens)
+            else:
+                config = build_node_config(node, tokens)
+                config_type = node.protocol.value
             digest = _digest(config)
             if self._pushed.get(node.id) == digest:
                 continue
             ok = await self._orchestrator.send_command(
-                node, {"config_type": node.protocol.value, "payload": config},
+                node, {"config_type": config_type, "payload": config},
             )
             results[node.id] = ok
             if ok:
