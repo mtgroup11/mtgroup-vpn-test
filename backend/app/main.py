@@ -87,6 +87,35 @@ try:
 except ImportError:
     HAS_BCC = False
 
+async def _bootstrap_admin(session_factory) -> None:
+    """Create the first admin from ADMIN_USERNAME/ADMIN_PASSWORD.
+
+    Nothing else ever read these settings, so a fresh install had no account
+    that could log in. Only runs while there is no admin at all: an existing
+    admin's password is never reset from .env on restart.
+    """
+    from sqlalchemy import select
+    from backend.app.core.security import hash_password
+    from backend.app.models import User, UserRole
+
+    async with session_factory() as session:
+        if await session.scalar(select(User.id).where(User.role == UserRole.ADMIN).limit(1)):
+            return
+        if await session.scalar(select(User.id).where(User.username == settings.ADMIN_USERNAME)):
+            logging.error("No admin exists but username %r is taken by a non-admin; "
+                          "not creating the initial admin.", settings.ADMIN_USERNAME)
+            return
+        try:
+            hashed = hash_password(settings.ADMIN_PASSWORD)
+        except ValueError as e:
+            logging.error("Initial admin not created: %s", e)
+            return
+        session.add(User(username=settings.ADMIN_USERNAME, hashed_password=hashed,
+                         role=UserRole.ADMIN, is_active=True))
+        await session.commit()
+        logging.info("Created initial admin %r from ADMIN_USERNAME.", settings.ADMIN_USERNAME)
+
+
 bpf_instance = None
 hopper_engine = None
 ai_engine = None
@@ -129,6 +158,7 @@ async def lifespan(app: FastAPI):
     logging.info("SQLite Async Database initialized.")
 
     db_session_factory = create_session_factory(engine)
+    await _bootstrap_admin(db_session_factory)
 
     # Wire up the real DB session dependency. `get_db` in api/auth.py is a
     # placeholder that raises NotImplementedError by design — every
